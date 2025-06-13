@@ -14,10 +14,14 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
   
-  const { loanData, loanIndex } = req.body;
+  const { loanData, loanIndex, credentials } = req.body;
   
   if (!loanData) {
     return res.status(400).json({ error: 'Loan data is required' });
+  }
+  
+  if (!credentials || !credentials.username || !credentials.password) {
+    return res.status(400).json({ error: 'Login credentials are required' });
   }
   
   try {
@@ -29,6 +33,8 @@ export default async function handler(req, res) {
     if (!GITHUB_TOKEN) {
       return res.status(500).json({ error: 'GitHub token not configured' });
     }
+    
+    console.log(`Processing loan ${loanIndex} for user: ${credentials.username}`);
     
     const response = await fetch(
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`,
@@ -45,6 +51,10 @@ export default async function handler(req, res) {
           client_payload: {
             loan_data: JSON.stringify(loanData),
             loan_index: loanIndex,
+            credentials: {
+              username: credentials.username,
+              password: credentials.password
+            },
             timestamp: new Date().toISOString()
           }
         })
@@ -54,7 +64,7 @@ export default async function handler(req, res) {
     if (response.ok || response.status === 204) {
       return res.status(200).json({
         success: true,
-        message: 'GitHub Actions triggered successfully',
+        message: `GitHub Actions triggered successfully for user: ${credentials.username}`,
         loanIndex: loanIndex
       });
     } else {
@@ -67,6 +77,7 @@ export default async function handler(req, res) {
     }
     
   } catch (error) {
+    console.error('Error triggering GitHub Actions:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error',
