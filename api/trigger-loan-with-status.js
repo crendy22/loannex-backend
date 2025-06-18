@@ -1,6 +1,6 @@
 // Enhanced backend API: /api/trigger-loan-with-status.js
-// Create this as a NEW file alongside your existing trigger-loan.js
-// Force deploy fix - [current time]
+// Complete version with Prepay Penalty error handling
+// Updated for full lock status monitoring
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -224,23 +224,38 @@ async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
 function extractErrorFromLogs(logs) {
     console.log('Analyzing logs for error patterns...');
     
-    // Common error patterns to look for
+    // Enhanced error patterns including Prepay Penalty errors
     const errorPatterns = [
+        // Prepay Penalty specific errors
+        {
+            pattern: /FAILED: Prepay Penalty is required when Occupancy = Investment/,
+            message: () => 'Prepay Penalty required for Investment properties',
+            details: () => 'Investment occupancy loans must specify a valid Prepay Penalty option (No Penalty, 5 Year, 4 Year, 3 Year, 2 Year, 1 Year).'
+        },
+        {
+            pattern: /ERROR: Invalid Prepay Penalty '([^']+)'/,
+            message: (match) => `Invalid Prepay Penalty: "${match[1]}"`,
+            details: () => 'Valid Prepay Penalty options: No Penalty, 5 Year, 4 Year, 3 Year, 2 Year, 1 Year'
+        },
+        {
+            pattern: /ERROR: Occupancy is 'Investment' but no Prepay Penalty specified/,
+            message: () => 'Missing Prepay Penalty for Investment loan',
+            details: () => 'Investment properties require a Prepay Penalty selection. Add the Prepay Penalty column to your Excel file.'
+        },
+        
+        // Investor errors
         {
             pattern: /FAILED: Could not select investor '([^']+)'/,
             message: (match) => `Investor "${match[1]}" not found in LoanNex`,
             details: (match) => `The investor "${match[1]}" could not be selected from the available options. Check if the investor name matches exactly in LoanNex.`
         },
         {
-            pattern: /Could not click Lock button/,
-            message: () => 'No loans available to lock after applying filters',
-            details: () => 'After applying the interest rate, investor, and amortizing type filters, no loans remained available for locking. The filters may have been too restrictive.'
+            pattern: /Failed to apply Investor filter/,
+            message: () => 'Investor filter could not be applied',
+            details: () => 'The investor multiselect dropdown could not be found or operated correctly.'
         },
-        {
-            pattern: /Login failed for (.+):/,
-            message: (match) => `Login failed for user ${match[1]}`,
-            details: () => 'Authentication failed. Check username and password credentials.'
-        },
+        
+        // Interest Rate errors
         {
             pattern: /Rate ([0-9.]+)% filtered out all available loans/,
             message: (match) => `Interest rate ${match[1]}% filtered out all loans`,
@@ -251,15 +266,60 @@ function extractErrorFromLogs(logs) {
             message: () => 'Interest rate filter could not be applied',
             details: () => 'The interest rate filter field could not be found or filled in the LoanNex interface.'
         },
-        {
-            pattern: /Failed to apply Investor filter/,
-            message: () => 'Investor filter could not be applied',
-            details: () => 'The investor multiselect dropdown could not be found or operated correctly.'
-        },
+        
+        // Amortizing Type errors
         {
             pattern: /Failed to apply Amortizing Type filter/,
             message: () => 'Amortizing type filter could not be applied',
             details: () => 'The amortizing type dropdown could not be found or the specified option was not available.'
+        },
+        
+        // Lock process errors
+        {
+            pattern: /Could not click Lock button/,
+            message: () => 'No loans available to lock after applying filters',
+            details: () => 'After applying the interest rate, investor, and amortizing type filters, no loans remained available for locking. The filters may have been too restrictive.'
+        },
+        {
+            pattern: /Could not find suitable first input field/,
+            message: () => 'Lock form could not be filled',
+            details: () => 'The borrower information form did not appear or could not be accessed after clicking Lock.'
+        },
+        {
+            pattern: /Could not click Submit Lock button/,
+            message: () => 'Lock submission failed',
+            details: () => 'The Submit Lock button could not be found or clicked after filling borrower information.'
+        },
+        
+        // Login errors
+        {
+            pattern: /Login failed for (.+):/,
+            message: (match) => `Login failed for user ${match[1]}`,
+            details: () => 'Authentication failed. Check username and password credentials.'
+        },
+        
+        // Field filling errors
+        {
+            pattern: /Error filling fields with conditional prepay/,
+            message: () => 'Form field filling failed',
+            details: () => 'An error occurred while filling out the loan application form fields.'
+        },
+        {
+            pattern: /Failed to switch to iframe/,
+            message: () => 'Could not access LoanNex interface',
+            details: () => 'The LoanNex pricing interface could not be accessed. The page structure may have changed.'
+        },
+        
+        // Browser/automation errors
+        {
+            pattern: /Failed to initialize Chrome driver/,
+            message: () => 'Browser automation failed to start',
+            details: () => 'The Chrome browser could not be initialized for automation. This is a system error.'
+        },
+        {
+            pattern: /Error clicking Get Price/,
+            message: () => 'Pricing calculation failed',
+            details: () => 'The Get Price button could not be clicked after filling loan fields.'
         }
     ];
 
@@ -282,7 +342,9 @@ function extractErrorFromLogs(logs) {
         line.includes('ERROR:') || 
         line.includes('Could not') ||
         line.includes('Login failed') ||
-        line.includes('Error in')
+        line.includes('Error in') ||
+        line.includes('Exception:') ||
+        line.includes('Traceback')
     );
 
     if (errorLine) {
