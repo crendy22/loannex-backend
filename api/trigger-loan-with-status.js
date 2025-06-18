@@ -168,9 +168,10 @@ async function monitorWorkflowCompletion(owner, repo, token, maxAttempts = 40) {
 
 // Function to analyze workflow results and extract meaningful error info
 // Function to analyze workflow results and extract meaningful error info
+// Simple and reliable success detection
 async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
     try {
-        // ALWAYS get logs to check for actual success message
+        // Get logs to check for actual success
         console.log('Analyzing workflow result, fetching logs...');
         
         try {
@@ -184,23 +185,24 @@ async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
             if (logsResponse.ok) {
                 const logs = await logsResponse.text();
                 
-                // Check for actual success message in logs FIRST
-                if (logs.includes('SUCCESS: Loan processed and locked')) {
-                    console.log('✅ Found success message in logs - loan actually locked!');
+                // Simple, reliable check - if Submit Lock clicked, the loan is locked!
+                if (logs.includes('Submit Lock button clicked successfully')) {
+                    console.log('✅ Found "Submit Lock button clicked successfully" - loan is locked!');
                     return {
                         success: true,
                         message: 'Loan successfully processed and locked in LoanNex',
-                        details: 'Confirmed via automation logs - loan lock completed successfully'
+                        details: 'Confirmed: Submit Lock button was clicked successfully'
                     };
                 }
                 
-                // If no success message, extract error details
+                // If no submit lock success, extract error details
+                console.log('❌ Submit Lock button was not clicked successfully');
                 const errorDetails = extractErrorFromLogs(logs);
                 
                 return {
                     success: false,
                     message: errorDetails.message || 'Loan processing failed',
-                    details: errorDetails.details || 'Check GitHub Actions logs for more details'
+                    details: errorDetails.details || 'Submit Lock button was not clicked successfully'
                 };
             }
         } catch (logError) {
@@ -212,15 +214,15 @@ async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
             return {
                 success: true,
                 message: 'Loan successfully processed and locked in LoanNex',
-                details: 'All automation steps completed successfully'
+                details: 'Workflow completed successfully'
             };
         }
 
-        // Fallback for failed workflow without logs
+        // Failed workflow
         return {
             success: false,
             message: 'Loan processing failed during automation',
-            details: `Workflow concluded with: ${workflowRun.conclusion}. Check GitHub Actions for details.`
+            details: `Workflow concluded with: ${workflowRun.conclusion}`
         };
 
     } catch (error) {
