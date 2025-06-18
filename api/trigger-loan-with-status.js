@@ -167,19 +167,11 @@ async function monitorWorkflowCompletion(owner, repo, token, maxAttempts = 40) {
 }
 
 // Function to analyze workflow results and extract meaningful error info
+// Function to analyze workflow results and extract meaningful error info
 async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
     try {
-        // If workflow succeeded, it's a success
-        if (workflowRun.conclusion === 'success') {
-            return {
-                success: true,
-                message: 'Loan successfully processed and locked in LoanNex',
-                details: 'All automation steps completed successfully'
-            };
-        }
-
-        // If workflow failed, try to get error details from logs
-        console.log('Workflow failed, extracting error details...');
+        // ALWAYS get logs to check for actual success message
+        console.log('Analyzing workflow result, fetching logs...');
         
         try {
             const logsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflowRun.id}/logs`, {
@@ -191,6 +183,18 @@ async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
 
             if (logsResponse.ok) {
                 const logs = await logsResponse.text();
+                
+                // Check for actual success message in logs FIRST
+                if (logs.includes('SUCCESS: Loan processed and locked')) {
+                    console.log('✅ Found success message in logs - loan actually locked!');
+                    return {
+                        success: true,
+                        message: 'Loan successfully processed and locked in LoanNex',
+                        details: 'Confirmed via automation logs - loan lock completed successfully'
+                    };
+                }
+                
+                // If no success message, extract error details
                 const errorDetails = extractErrorFromLogs(logs);
                 
                 return {
@@ -201,6 +205,15 @@ async function analyzeWorkflowResult(owner, repo, token, workflowRun) {
             }
         } catch (logError) {
             console.error('Failed to fetch logs:', logError);
+        }
+
+        // Fallback to workflow conclusion if we can't get logs
+        if (workflowRun.conclusion === 'success') {
+            return {
+                success: true,
+                message: 'Loan successfully processed and locked in LoanNex',
+                details: 'All automation steps completed successfully'
+            };
         }
 
         // Fallback for failed workflow without logs
