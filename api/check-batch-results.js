@@ -1,5 +1,7 @@
-// DEBUG VERSION: /api/check-batch-results.js  
-// This will show us exactly what's in the logs
+// FIXED: /api/check-batch-results.js with proper log decompression
+// GitHub Actions logs are gzip compressed - we need to decompress them!
+
+import { gunzipSync } from 'zlib';
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -25,7 +27,7 @@ export default async function handler(req, res) {
             });
         }
 
-        console.log(`🔍 DEBUG: Checking batch results since: ${batchStartTime}`);
+        console.log(`🔍 FIXED: Checking batch results with DECOMPRESSION since: ${batchStartTime}`);
 
         // GitHub repository details
         const GITHUB_OWNER = 'crendy22';
@@ -67,11 +69,11 @@ export default async function handler(req, res) {
 
         console.log(`✅ Completed: ${completedWorkflows.length}, 🔄 Still running: ${runningWorkflows.length}`);
 
-        // Analyze each completed workflow with DEBUG
+        // Analyze each completed workflow with PROPER DECOMPRESSION
         const results = [];
         for (const workflow of completedWorkflows) {
             try {
-                const loanResult = await analyzeWorkflowForLoanResultDEBUG(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
+                const loanResult = await analyzeWorkflowWithDecompression(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
                 if (loanResult) {
                     results.push(loanResult);
                 }
@@ -96,7 +98,7 @@ export default async function handler(req, res) {
         const successRate = results.length > 0 ? Math.round((successfulLocks / results.length) * 100) : 0;
         const stillProcessing = runningWorkflows.length;
 
-        console.log(`📈 FINAL: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
+        console.log(`📈 FINAL WITH DECOMPRESSION: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
 
         return res.status(200).json({
             success: true,
@@ -123,12 +125,12 @@ export default async function handler(req, res) {
     }
 }
 
-// DEBUG VERSION: Shows us exactly what's in the logs
-async function analyzeWorkflowForLoanResultDEBUG(owner, repo, token, workflow) {
+// FIXED: Properly decompress GitHub Actions logs
+async function analyzeWorkflowWithDecompression(owner, repo, token, workflow) {
     try {
-        console.log(`🔍 DEBUG: Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
+        console.log(`🔍 DECOMPRESSION: Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
         
-        // Get workflow logs
+        // Get workflow logs as binary data
         const logsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflow.id}/logs`, {
             headers: {
                 'Authorization': `Bearer ${token}`,
@@ -150,69 +152,80 @@ async function analyzeWorkflowForLoanResultDEBUG(owner, repo, token, workflow) {
             };
         }
 
-        const logs = await logsResponse.text();
-        console.log(`📝 DEBUG: Got logs for workflow ${workflow.id}, length: ${logs.length}`);
+        // Get logs as buffer (binary data)
+        const compressedLogs = await logsResponse.arrayBuffer();
+        console.log(`📦 Got compressed logs for workflow ${workflow.id}, size: ${compressedLogs.byteLength} bytes`);
         
-        // DEBUG: Show us what's actually in the logs around success/failure
-        const lines = logs.split('\n');
-        console.log(`📄 DEBUG: Total lines in log: ${lines.length}`);
-        
-        // Look for key phrases and show context
-        const keyPhrases = ['Submit Lock', 'SUCCESS:', 'FAILED:', 'button clicked', 'Loan processed'];
-        for (const phrase of keyPhrases) {
-            const matchingLines = lines.filter(line => line.toLowerCase().includes(phrase.toLowerCase()));
-            if (matchingLines.length > 0) {
-                console.log(`🔍 DEBUG: Found ${matchingLines.length} lines with "${phrase}":`);
-                matchingLines.slice(0, 3).forEach(line => {
-                    console.log(`  --> ${line.trim()}`);
-                });
+        try {
+            // DECOMPRESS the logs using gzip
+            const decompressedLogs = gunzipSync(Buffer.from(compressedLogs));
+            const logs = decompressedLogs.toString('utf8');
+            
+            console.log(`📝 DECOMPRESSED logs for workflow ${workflow.id}, length: ${logs.length} characters`);
+            
+            // Now we can search the actual text!
+            const successPatterns = [
+                'Submit Lock button clicked successfully',
+                'SUCCESS: Loan processed and locked',
+                'Loan lock completed successfully'
+            ];
+            
+            let locked = false;
+            let successPattern = '';
+            
+            for (const pattern of successPatterns) {
+                if (logs.includes(pattern)) {
+                    locked = true;
+                    successPattern = pattern;
+                    console.log(`🎯 FOUND SUCCESS PATTERN: "${pattern}"`);
+                    break;
+                } else {
+                    console.log(`❌ Pattern "${pattern}" NOT found in decompressed logs`);
+                }
             }
-        }
-        
-        // Original success detection
-        const successPatterns = [
-            'Submit Lock button clicked successfully',
-            'SUCCESS: Loan processed and locked',
-            'Loan lock completed successfully'
-        ];
-        
-        let locked = false;
-        let successPattern = '';
-        
-        for (const pattern of successPatterns) {
-            if (logs.includes(pattern)) {
-                locked = true;
-                successPattern = pattern;
-                console.log(`🎯 DEBUG: FOUND SUCCESS PATTERN: "${pattern}"`);
-                break;
-            } else {
-                console.log(`❌ DEBUG: Pattern "${pattern}" NOT found`);
-            }
-        }
-        
-        // DEBUG: Show last 10 lines of log
-        console.log(`📋 DEBUG: Last 10 lines of workflow ${workflow.id}:`);
-        lines.slice(-10).forEach((line, index) => {
-            console.log(`  ${lines.length - 10 + index}: ${line.trim()}`);
-        });
-        
-        const loanIndex = extractLoanIndex(logs);
-        const borrowerName = extractBorrowerName(logs);
-        const errorMessage = locked ? null : extractMainError(logs);
+            
+            // DEBUG: Show some actual log content
+            const lines = logs.split('\n');
+            console.log(`📄 Total lines in decompressed log: ${lines.length}`);
+            
+            // Show last few lines of actual text
+            const lastLines = lines.slice(-5).filter(line => line.trim().length > 0);
+            console.log(`📋 Last 5 non-empty lines:`);
+            lastLines.forEach((line, index) => {
+                console.log(`  ${index + 1}: ${line.trim().substring(0, 100)}...`);
+            });
+            
+            const loanIndex = extractLoanIndex(logs);
+            const borrowerName = extractBorrowerName(logs);
+            const errorMessage = locked ? null : extractMainError(logs);
 
-        console.log(`📊 DEBUG: Final analysis - loan=${loanIndex}, borrower=${borrowerName}, locked=${locked}, pattern="${successPattern}"`);
+            console.log(`📊 DECOMPRESSED ANALYSIS: loan=${loanIndex}, borrower=${borrowerName}, locked=${locked}, pattern="${successPattern}"`);
 
-        return {
-            workflowId: workflow.id,
-            loanIndex: loanIndex,
-            borrowerName: borrowerName,
-            locked: locked,
-            errorMessage: errorMessage,
-            completedAt: workflow.updated_at,
-            githubUrl: workflow.html_url,
-            status: 'analyzed',
-            successPattern: successPattern
-        };
+            return {
+                workflowId: workflow.id,
+                loanIndex: loanIndex,
+                borrowerName: borrowerName,
+                locked: locked,
+                errorMessage: errorMessage,
+                completedAt: workflow.updated_at,
+                githubUrl: workflow.html_url,
+                status: 'analyzed',
+                successPattern: successPattern
+            };
+
+        } catch (decompressionError) {
+            console.error(`💥 Failed to decompress logs for workflow ${workflow.id}:`, decompressionError);
+            return {
+                workflowId: workflow.id,
+                loanIndex: 'Unknown',
+                borrowerName: 'Unknown',
+                locked: false,
+                errorMessage: `Failed to decompress logs: ${decompressionError.message}`,
+                completedAt: workflow.updated_at,
+                githubUrl: workflow.html_url,
+                status: 'decompression_failed'
+            };
+        }
 
     } catch (error) {
         console.error(`💥 Error analyzing workflow ${workflow.id}:`, error);
