@@ -1,6 +1,5 @@
-// /api/check-batch-results.js
-// FIXED: Proper log parsing to detect actual loan locks
-// This is the foundation for the clean user experience
+// DEBUG VERSION: /api/check-batch-results.js  
+// This will show us exactly what's in the logs
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -26,7 +25,7 @@ export default async function handler(req, res) {
             });
         }
 
-        console.log(`🔍 FIXED: Checking batch results since: ${batchStartTime}`);
+        console.log(`🔍 DEBUG: Checking batch results since: ${batchStartTime}`);
 
         // GitHub repository details
         const GITHUB_OWNER = 'crendy22';
@@ -68,17 +67,16 @@ export default async function handler(req, res) {
 
         console.log(`✅ Completed: ${completedWorkflows.length}, 🔄 Still running: ${runningWorkflows.length}`);
 
-        // Analyze each completed workflow
+        // Analyze each completed workflow with DEBUG
         const results = [];
         for (const workflow of completedWorkflows) {
             try {
-                const loanResult = await analyzeWorkflowForLoanResult(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
+                const loanResult = await analyzeWorkflowForLoanResultDEBUG(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
                 if (loanResult) {
                     results.push(loanResult);
                 }
             } catch (error) {
                 console.error(`❌ Error analyzing workflow ${workflow.id}:`, error);
-                // Add failed analysis as a result
                 results.push({
                     workflowId: workflow.id,
                     loanIndex: 'Unknown',
@@ -98,7 +96,7 @@ export default async function handler(req, res) {
         const successRate = results.length > 0 ? Math.round((successfulLocks / results.length) * 100) : 0;
         const stillProcessing = runningWorkflows.length;
 
-        console.log(`📈 Batch results: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
+        console.log(`📈 FINAL: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
 
         return res.status(200).json({
             success: true,
@@ -108,7 +106,7 @@ export default async function handler(req, res) {
                 failedLocks: failedLocks,
                 successRate: successRate,
                 stillProcessing: stillProcessing,
-                isComplete: stillProcessing === 0 // True when all workflows are done
+                isComplete: stillProcessing === 0
             },
             results: results,
             timestamp: new Date().toISOString()
@@ -125,10 +123,10 @@ export default async function handler(req, res) {
     }
 }
 
-// FIXED: Analyze individual workflow for loan results with better error handling
-async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
+// DEBUG VERSION: Shows us exactly what's in the logs
+async function analyzeWorkflowForLoanResultDEBUG(owner, repo, token, workflow) {
     try {
-        console.log(`🔍 Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
+        console.log(`🔍 DEBUG: Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
         
         // Get workflow logs
         const logsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflow.id}/logs`, {
@@ -153,9 +151,25 @@ async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
         }
 
         const logs = await logsResponse.text();
-        console.log(`📝 Got logs for workflow ${workflow.id}, length: ${logs.length}`);
+        console.log(`📝 DEBUG: Got logs for workflow ${workflow.id}, length: ${logs.length}`);
         
-        // FIXED: Multiple ways to detect success
+        // DEBUG: Show us what's actually in the logs around success/failure
+        const lines = logs.split('\n');
+        console.log(`📄 DEBUG: Total lines in log: ${lines.length}`);
+        
+        // Look for key phrases and show context
+        const keyPhrases = ['Submit Lock', 'SUCCESS:', 'FAILED:', 'button clicked', 'Loan processed'];
+        for (const phrase of keyPhrases) {
+            const matchingLines = lines.filter(line => line.toLowerCase().includes(phrase.toLowerCase()));
+            if (matchingLines.length > 0) {
+                console.log(`🔍 DEBUG: Found ${matchingLines.length} lines with "${phrase}":`);
+                matchingLines.slice(0, 3).forEach(line => {
+                    console.log(`  --> ${line.trim()}`);
+                });
+            }
+        }
+        
+        // Original success detection
         const successPatterns = [
             'Submit Lock button clicked successfully',
             'SUCCESS: Loan processed and locked',
@@ -169,19 +183,24 @@ async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
             if (logs.includes(pattern)) {
                 locked = true;
                 successPattern = pattern;
+                console.log(`🎯 DEBUG: FOUND SUCCESS PATTERN: "${pattern}"`);
                 break;
+            } else {
+                console.log(`❌ DEBUG: Pattern "${pattern}" NOT found`);
             }
         }
         
-        console.log(`🔍 Workflow ${workflow.id}: locked=${locked}, pattern="${successPattern}"`);
+        // DEBUG: Show last 10 lines of log
+        console.log(`📋 DEBUG: Last 10 lines of workflow ${workflow.id}:`);
+        lines.slice(-10).forEach((line, index) => {
+            console.log(`  ${lines.length - 10 + index}: ${line.trim()}`);
+        });
         
-        // Extract loan information from logs
         const loanIndex = extractLoanIndex(logs);
         const borrowerName = extractBorrowerName(logs);
         const errorMessage = locked ? null : extractMainError(logs);
 
-        // Debug logging
-        console.log(`📊 Workflow ${workflow.id} results: loan=${loanIndex}, borrower=${borrowerName}, locked=${locked}`);
+        console.log(`📊 DEBUG: Final analysis - loan=${loanIndex}, borrower=${borrowerName}, locked=${locked}, pattern="${successPattern}"`);
 
         return {
             workflowId: workflow.id,
@@ -210,7 +229,7 @@ async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
     }
 }
 
-// FIXED: Extract loan index from logs with better patterns
+// Extract loan index from logs
 function extractLoanIndex(logs) {
     const patterns = [
         /Processing loan (\d+)/i,
@@ -229,7 +248,7 @@ function extractLoanIndex(logs) {
     return 'Unknown';
 }
 
-// FIXED: Extract borrower name from logs with better patterns  
+// Extract borrower name from logs  
 function extractBorrowerName(logs) {
     const patterns = [
         /Set first field value.*?'([^']+)'/i,
@@ -248,29 +267,17 @@ function extractBorrowerName(logs) {
     return 'Unknown';
 }
 
-// FIXED: Extract main error message from logs with comprehensive patterns
+// Extract main error message from logs
 function extractMainError(logs) {
-    // Priority order of error patterns - most specific first
     const errorPatterns = [
-        // Prepay Penalty errors
         { pattern: /FAILED: Prepay Penalty is required when Occupancy = Investment/i, message: 'Prepay Penalty required for Investment properties' },
         { pattern: /ERROR: Invalid Prepay Penalty '([^']+)'/i, message: (m) => `Invalid Prepay Penalty: "${m[1]}"` },
-        
-        // Investor errors  
         { pattern: /FAILED: Could not select investor '([^']+)'/i, message: (m) => `Investor "${m[1]}" not found in LoanNex` },
         { pattern: /Failed to apply Investor filter/i, message: 'Investor filter could not be applied' },
-        
-        // Interest Rate errors
         { pattern: /Rate ([0-9.]+)% filtered out all available loans/i, message: (m) => `Interest rate ${m[1]}% filtered out all loans` },
-        
-        // Lock process errors
         { pattern: /Could not click Lock button/i, message: 'No loans available to lock after applying filters' },
         { pattern: /Could not click Submit Lock button/i, message: 'Lock submission failed' },
-        
-        // Login errors
         { pattern: /Login failed for (.+):/i, message: (m) => `Login failed for user ${m[1]}` },
-        
-        // Generic failure patterns
         { pattern: /FAILED:/i, message: 'Automation process failed' },
         { pattern: /ERROR:/i, message: 'Error occurred during processing' }
     ];
@@ -286,7 +293,6 @@ function extractMainError(logs) {
         }
     }
     
-    // Fallback: look for any clear error lines
     const lines = logs.split('\n');
     const errorLine = lines.find(line => 
         (line.includes('FAILED:') || line.includes('ERROR:') || line.includes('Could not')) &&
