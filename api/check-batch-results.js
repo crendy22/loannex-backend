@@ -1,5 +1,6 @@
 // /api/check-batch-results.js
-// Checks completed GitHub Actions workflows and returns business-friendly results
+// FIXED: Proper log parsing to detect actual loan locks
+// This is the foundation for the clean user experience
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -25,7 +26,7 @@ export default async function handler(req, res) {
             });
         }
 
-        console.log(`Checking batch results since: ${batchStartTime}`);
+        console.log(`🔍 FIXED: Checking batch results since: ${batchStartTime}`);
 
         // GitHub repository details
         const GITHUB_OWNER = 'crendy22';
@@ -57,21 +58,26 @@ export default async function handler(req, res) {
                 const runTime = new Date(run.created_at);
                 return runTime >= cutoffTime;
             })
-            .filter(run => run.status === 'completed') // Only completed workflows
             .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-        console.log(`Found ${batchWorkflows.length} completed workflows since batch start`);
+        console.log(`📊 Found ${batchWorkflows.length} workflows since batch start`);
 
-        // Analyze each workflow
+        // Separate completed vs still running
+        const completedWorkflows = batchWorkflows.filter(run => run.status === 'completed');
+        const runningWorkflows = batchWorkflows.filter(run => run.status !== 'completed');
+
+        console.log(`✅ Completed: ${completedWorkflows.length}, 🔄 Still running: ${runningWorkflows.length}`);
+
+        // Analyze each completed workflow
         const results = [];
-        for (const workflow of batchWorkflows) {
+        for (const workflow of completedWorkflows) {
             try {
                 const loanResult = await analyzeWorkflowForLoanResult(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
                 if (loanResult) {
                     results.push(loanResult);
                 }
             } catch (error) {
-                console.error(`Error analyzing workflow ${workflow.id}:`, error);
+                console.error(`❌ Error analyzing workflow ${workflow.id}:`, error);
                 // Add failed analysis as a result
                 results.push({
                     workflowId: workflow.id,
@@ -80,7 +86,8 @@ export default async function handler(req, res) {
                     locked: false,
                     errorMessage: 'Failed to analyze workflow results',
                     completedAt: workflow.updated_at,
-                    githubUrl: workflow.html_url
+                    githubUrl: workflow.html_url,
+                    status: 'analysis_failed'
                 });
             }
         }
@@ -89,8 +96,9 @@ export default async function handler(req, res) {
         const successfulLocks = results.filter(r => r.locked).length;
         const failedLocks = results.filter(r => !r.locked).length;
         const successRate = results.length > 0 ? Math.round((successfulLocks / results.length) * 100) : 0;
+        const stillProcessing = runningWorkflows.length;
 
-        console.log(`Batch results: ${successfulLocks} locked, ${failedLocks} failed`);
+        console.log(`📈 Batch results: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
 
         return res.status(200).json({
             success: true,
@@ -98,14 +106,16 @@ export default async function handler(req, res) {
                 totalProcessed: results.length,
                 successfulLocks: successfulLocks,
                 failedLocks: failedLocks,
-                successRate: successRate
+                successRate: successRate,
+                stillProcessing: stillProcessing,
+                isComplete: stillProcessing === 0 // True when all workflows are done
             },
             results: results,
             timestamp: new Date().toISOString()
         });
 
     } catch (error) {
-        console.error('Batch results check error:', error);
+        console.error('❌ Batch results check error:', error);
         
         return res.status(500).json({
             success: false,
@@ -115,9 +125,11 @@ export default async function handler(req, res) {
     }
 }
 
-// Analyze individual workflow for loan results
+// FIXED: Analyze individual workflow for loan results with better error handling
 async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
     try {
+        console.log(`🔍 Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
+        
         // Get workflow logs
         const logsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflow.id}/logs`, {
             headers: {
@@ -127,17 +139,49 @@ async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
         });
 
         if (!logsResponse.ok) {
-            console.log(`Could not fetch logs for workflow ${workflow.id}`);
-            return null;
+            console.log(`⚠️ Could not fetch logs for workflow ${workflow.id}: ${logsResponse.status}`);
+            return {
+                workflowId: workflow.id,
+                loanIndex: 'Unknown',
+                borrowerName: 'Unknown',
+                locked: false,
+                errorMessage: 'Could not fetch workflow logs',
+                completedAt: workflow.updated_at,
+                githubUrl: workflow.html_url,
+                status: 'log_fetch_failed'
+            };
         }
 
         const logs = await logsResponse.text();
+        console.log(`📝 Got logs for workflow ${workflow.id}, length: ${logs.length}`);
+        
+        // FIXED: Multiple ways to detect success
+        const successPatterns = [
+            'Submit Lock button clicked successfully',
+            'SUCCESS: Loan processed and locked',
+            'Loan lock completed successfully'
+        ];
+        
+        let locked = false;
+        let successPattern = '';
+        
+        for (const pattern of successPatterns) {
+            if (logs.includes(pattern)) {
+                locked = true;
+                successPattern = pattern;
+                break;
+            }
+        }
+        
+        console.log(`🔍 Workflow ${workflow.id}: locked=${locked}, pattern="${successPattern}"`);
         
         // Extract loan information from logs
         const loanIndex = extractLoanIndex(logs);
         const borrowerName = extractBorrowerName(logs);
-        const locked = logs.includes('Submit Lock button clicked successfully');
         const errorMessage = locked ? null : extractMainError(logs);
+
+        // Debug logging
+        console.log(`📊 Workflow ${workflow.id} results: loan=${loanIndex}, borrower=${borrowerName}, locked=${locked}`);
 
         return {
             workflowId: workflow.id,
@@ -146,84 +190,112 @@ async function analyzeWorkflowForLoanResult(owner, repo, token, workflow) {
             locked: locked,
             errorMessage: errorMessage,
             completedAt: workflow.updated_at,
-            githubUrl: workflow.html_url
+            githubUrl: workflow.html_url,
+            status: 'analyzed',
+            successPattern: successPattern
         };
 
     } catch (error) {
-        console.error(`Error analyzing workflow ${workflow.id}:`, error);
-        return null;
+        console.error(`💥 Error analyzing workflow ${workflow.id}:`, error);
+        return {
+            workflowId: workflow.id,
+            loanIndex: 'Unknown',
+            borrowerName: 'Unknown',
+            locked: false,
+            errorMessage: `Analysis error: ${error.message}`,
+            completedAt: workflow.updated_at,
+            githubUrl: workflow.html_url,
+            status: 'analysis_error'
+        };
     }
 }
 
-// Extract loan index from logs
+// FIXED: Extract loan index from logs with better patterns
 function extractLoanIndex(logs) {
-    // Look for patterns like "Processing loan 1" or "loan_index: 1"
-    const indexMatch = logs.match(/Processing loan (\d+)/i) || 
-                      logs.match(/loan_index[:\s]+(\d+)/i) ||
-                      logs.match(/loan (\d+)/i);
-    
-    return indexMatch ? parseInt(indexMatch[1]) : 'Unknown';
-}
-
-// Extract borrower name from logs
-function extractBorrowerName(logs) {
-    // Look for patterns in the automation logs
-    const namePatterns = [
-        /Set first field value using JavaScript.*?(\w+)/i,
-        /First Name[:\s]+(\w+)/i,
-        /Processing fields.*?(\w+)/i
+    const patterns = [
+        /Processing loan (\d+)/i,
+        /loan_index[:\s]+(\d+)/i,
+        /loan (\d+)/i,
+        /Loan #(\d+)/i
     ];
     
-    for (const pattern of namePatterns) {
+    for (const pattern of patterns) {
         const match = logs.match(pattern);
-        if (match && match[1] && match[1] !== 'doe') {
-            return match[1];
+        if (match) {
+            return parseInt(match[1]);
         }
-    }
-    
-    // Fallback: try to extract from validation logs
-    const validationMatch = logs.match(/Validating loan.*?(\w+)/i);
-    if (validationMatch && validationMatch[1]) {
-        return validationMatch[1];
     }
     
     return 'Unknown';
 }
 
-// Extract main error message from logs
-function extractMainError(logs) {
-    // Priority order of error patterns
-    const errorPatterns = [
-        /FAILED: Could not select investor '([^']+)'/i,
-        /FAILED: Prepay Penalty is required/i,
-        /ERROR: Invalid Prepay Penalty/i,
-        /Login failed for (.+):/i,
-        /Could not click Lock button/i,
-        /Could not find suitable first input field/i,
-        /Could not click Submit Lock button/i,
-        /Failed to apply Interest Rate filter/i,
-        /Failed to apply Investor filter/i,
-        /Failed to apply Amortizing Type filter/i
+// FIXED: Extract borrower name from logs with better patterns  
+function extractBorrowerName(logs) {
+    const patterns = [
+        /Set first field value.*?'([^']+)'/i,
+        /First Name[:\s]+([A-Za-z]+)/i,
+        /filled.*?first.*?name.*?'([^']+)'/i,
+        /borrower.*?name[:\s]+([A-Za-z]+)/i
     ];
     
-    for (const pattern of errorPatterns) {
+    for (const pattern of patterns) {
         const match = logs.match(pattern);
-        if (match) {
-            return match[0].replace('FAILED: ', '').replace('ERROR: ', '');
+        if (match && match[1] && match[1] !== 'doe' && match[1] !== 'Investment' && match[1].length > 1) {
+            return match[1];
         }
     }
     
-    // Look for any FAILED or ERROR lines
+    return 'Unknown';
+}
+
+// FIXED: Extract main error message from logs with comprehensive patterns
+function extractMainError(logs) {
+    // Priority order of error patterns - most specific first
+    const errorPatterns = [
+        // Prepay Penalty errors
+        { pattern: /FAILED: Prepay Penalty is required when Occupancy = Investment/i, message: 'Prepay Penalty required for Investment properties' },
+        { pattern: /ERROR: Invalid Prepay Penalty '([^']+)'/i, message: (m) => `Invalid Prepay Penalty: "${m[1]}"` },
+        
+        // Investor errors  
+        { pattern: /FAILED: Could not select investor '([^']+)'/i, message: (m) => `Investor "${m[1]}" not found in LoanNex` },
+        { pattern: /Failed to apply Investor filter/i, message: 'Investor filter could not be applied' },
+        
+        // Interest Rate errors
+        { pattern: /Rate ([0-9.]+)% filtered out all available loans/i, message: (m) => `Interest rate ${m[1]}% filtered out all loans` },
+        
+        // Lock process errors
+        { pattern: /Could not click Lock button/i, message: 'No loans available to lock after applying filters' },
+        { pattern: /Could not click Submit Lock button/i, message: 'Lock submission failed' },
+        
+        // Login errors
+        { pattern: /Login failed for (.+):/i, message: (m) => `Login failed for user ${m[1]}` },
+        
+        // Generic failure patterns
+        { pattern: /FAILED:/i, message: 'Automation process failed' },
+        { pattern: /ERROR:/i, message: 'Error occurred during processing' }
+    ];
+    
+    for (const errorPattern of errorPatterns) {
+        const match = logs.match(errorPattern.pattern);
+        if (match) {
+            if (typeof errorPattern.message === 'function') {
+                return errorPattern.message(match);
+            } else {
+                return errorPattern.message;
+            }
+        }
+    }
+    
+    // Fallback: look for any clear error lines
     const lines = logs.split('\n');
     const errorLine = lines.find(line => 
-        line.includes('FAILED:') || 
-        line.includes('ERROR:') || 
-        line.includes('Could not')
+        (line.includes('FAILED:') || line.includes('ERROR:') || line.includes('Could not')) &&
+        !line.includes('DEBUG') && !line.includes('INFO')
     );
     
     if (errorLine) {
-        return errorLine.trim().replace(/^\d+/, '').replace('FAILED: ', '').replace('ERROR: ', '').trim();
+        return errorLine.replace(/^\d+\s*/, '').replace(/^(FAILED:|ERROR:)\s*/, '').trim();
     }
     
-    return 'Unknown error - check GitHub Actions logs';
+    return 'Unknown error - check GitHub Actions logs for details';
 }
