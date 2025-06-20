@@ -227,7 +227,7 @@ function extractPricingFromLogs(logsText) {
         console.log(`💰 PARSING LOGS: Searching for pricing data in logs...`);
         
         // Look for the pricing data output line
-        const pricingOutputPattern = /💰 PRICING_DATA_OUTPUT:\s*({.*})/;
+        const pricingOutputPattern = /💰 PRICING_DATA_OUTPUT:\s*(\{"pricing_status".*?\})\s*$/m;
         const match = logsText.match(pricingOutputPattern);
         
         if (!match) {
