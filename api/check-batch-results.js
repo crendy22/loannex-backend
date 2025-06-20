@@ -36,7 +36,7 @@ export default async function handler(req, res) {
         }
 
         // Get workflows since batch started
-        const cutoffTime = new Date(batchStartTime);
+        const cutoffTime = new Date(new Date(batchStartTime).getTime() - 30000); // 30 seconds buffer
         console.log(`🔍 DEBUG: Cutoff time: ${cutoffTime.toISOString()}`);
         console.log(`🔍 DEBUG: Current time: ${new Date().toISOString()}`);
 
