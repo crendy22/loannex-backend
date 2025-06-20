@@ -1,5 +1,5 @@
 // /api/get-pricing-results.js
-// NEW: Get pricing results for review workflow
+// FIXED: Get REAL pricing results from GitHub workflow logs
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -36,7 +36,7 @@ export default async function handler(req, res) {
             throw new Error('GitHub token not configured');
         }
 
-        // Get workflows since batch started (with 30-second buffer like we fixed)
+        // Get workflows since batch started (with 30-second buffer)
         const cutoffTime = new Date(new Date(batchStartTime).getTime() - 30000);
         const runsResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs?per_page=50`, {
             headers: {
@@ -67,11 +67,11 @@ export default async function handler(req, res) {
 
         console.log(`✅ Completed: ${completedWorkflows.length}, 🔄 Still running: ${runningWorkflows.length}`);
 
-        // Analyze each completed workflow for PRICING DATA
+        // Extract REAL pricing data from each completed workflow
         const pricingResults = [];
         for (const workflow of completedWorkflows) {
             try {
-                const pricingData = await extractPricingData(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
+                const pricingData = await extractRealPricingData(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
                 if (pricingData) {
                     pricingResults.push(pricingData);
                 }
@@ -118,12 +118,12 @@ export default async function handler(req, res) {
     }
 }
 
-// Extract pricing data from completed workflows
-async function extractPricingData(owner, repo, token, workflow) {
+// FIXED: Extract REAL pricing data from GitHub workflow logs
+async function extractRealPricingData(owner, repo, token, workflow) {
     try {
-        console.log(`💰 PRICING EXTRACTION: Analyzing workflow ${workflow.id} for pricing data`);
+        console.log(`💰 REAL EXTRACTION: Analyzing workflow ${workflow.id} for actual pricing data`);
         
-        // Get workflow jobs to understand what happened
+        // Get workflow jobs
         const jobsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflow.id}/jobs`, {
             headers: {
                 'Authorization': `Bearer ${token}`,
@@ -136,71 +136,119 @@ async function extractPricingData(owner, repo, token, workflow) {
         }
 
         const jobsData = await jobsResponse.json();
-        console.log(`💰 Found ${jobsData.jobs.length} jobs for pricing workflow ${workflow.id}`);
+        console.log(`💰 Found ${jobsData.jobs.length} jobs for workflow ${workflow.id}`);
 
-        // Try to extract pricing information from job outputs/logs
-        // Since we can't easily get logs, we'll use heuristics and job conclusions
-        
-        let pricingStatus = 'error';
-        let interestRate = null;
-        let investor = null;
-        let borrowerName = 'Unknown';
-        let loanAmount = null;
-        let propertyType = null;
-        let errorMessage = null;
-        
-        // If workflow succeeded, assume we got pricing
-        if (workflow.conclusion === 'success') {
-            pricingStatus = 'success';
-            
-            // For demo purposes, simulate realistic pricing data
-            // In real implementation, this would come from actual workflow logs
-            interestRate = generateRealisticRate();
-            investor = generateRealisticInvestor();
-            loanAmount = generateRealisticLoanAmount();
-            propertyType = generateRealisticPropertyType();
-            
-            console.log(`💰 SUCCESS: Generated pricing data for workflow ${workflow.id}`);
-        } else {
-            // Look at failed jobs for error reasons
-            const failedJob = jobsData.jobs.find(job => job.conclusion === 'failure');
-            if (failedJob) {
-                errorMessage = `Pricing failed: ${failedJob.name} job failed`;
-            } else {
-                errorMessage = `Pricing workflow failed with conclusion: ${workflow.conclusion}`;
-            }
-            console.log(`❌ PRICING FAILED: ${errorMessage}`);
+        // Look for pricing-only job specifically
+        const pricingJob = jobsData.jobs.find(job => 
+            job.name.toLowerCase().includes('pricing') || 
+            job.name.toLowerCase().includes('price')
+        );
+
+        if (!pricingJob) {
+            throw new Error('No pricing job found in workflow');
         }
+
+        console.log(`💰 Found pricing job: ${pricingJob.name} (${pricingJob.conclusion})`);
+
+        // Get the job logs to extract pricing data
+        const logsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/jobs/${pricingJob.id}/logs`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+
+        if (!logsResponse.ok) {
+            throw new Error(`Failed to get job logs: ${logsResponse.status}`);
+        }
+
+        const logsText = await logsResponse.text();
+        console.log(`💰 Retrieved ${logsText.length} characters of log data`);
+
+        // Extract the pricing data from logs
+        const pricingData = extractPricingFromLogs(logsText);
         
-        const loanIndex = extractLoanIndexFromJobName(jobsData.jobs);
-        
+        if (!pricingData) {
+            throw new Error('No pricing data found in logs');
+        }
+
+        console.log(`💰 SUCCESS: Extracted real pricing data:`, pricingData);
+
+        // Determine loan index from workflow or job data
+        const loanIndex = extractLoanIndexFromJobName(jobsData.jobs) || extractLoanIndexFromWorkflow(workflow);
+
+        // Return the real extracted data
         return {
             workflowId: workflow.id,
             loanIndex: loanIndex,
-            borrowerName: borrowerName,
-            pricingStatus: pricingStatus,
-            interestRate: interestRate,
-            investor: investor,
-            loanAmount: loanAmount,
-            propertyType: propertyType,
-            errorMessage: errorMessage,
+            borrowerName: pricingData.borrower_name || 'Unknown',
+            pricingStatus: pricingData.pricing_status || 'success',
+            interestRate: pricingData.best_rate_option?.interest_rate || pricingData.pricing_options?.[0]?.interest_rate,
+            rateDescription: pricingData.best_rate_option?.rate_period || pricingData.pricing_options?.[0]?.rate_period,
+            pricePoints: pricingData.best_rate_option?.price_points || pricingData.pricing_options?.[0]?.price_points,
+            priceCost: pricingData.best_rate_option?.price_cost || pricingData.pricing_options?.[0]?.price_cost,
+            productType: pricingData.best_rate_option?.product_type || pricingData.pricing_options?.[0]?.product_type,
+            programName: pricingData.best_rate_option?.program_name || pricingData.pricing_options?.[0]?.program_name,
+            programDescription: pricingData.best_rate_option?.program_description || pricingData.pricing_options?.[0]?.program_description,
+            monthlyPayment: pricingData.best_rate_option?.monthly_payment || pricingData.pricing_options?.[0]?.monthly_payment,
+            investor: pricingData.best_rate_option?.program_name || 'Unknown', // Use program name as investor
+            loanAmount: pricingData.loan_amount,
+            propertyType: pricingData.property_type,
+            totalOptions: pricingData.total_options || 0,
+            allPricingOptions: pricingData.pricing_options || [],
+            errorMessage: pricingData.error_message || null,
             completedAt: workflow.updated_at,
             githubUrl: workflow.html_url,
-            extractionMethod: 'workflow_conclusion_based'
+            extractionMethod: 'real_log_extraction'
         };
 
     } catch (error) {
-        console.error(`💥 Error extracting pricing from workflow ${workflow.id}:`, error);
+        console.error(`💥 Error extracting real pricing from workflow ${workflow.id}:`, error);
         return {
             workflowId: workflow.id,
             loanIndex: 'Unknown',
             borrowerName: 'Unknown',
             pricingStatus: 'error',
-            errorMessage: `Pricing extraction error: ${error.message}`,
+            errorMessage: `Real pricing extraction error: ${error.message}`,
             completedAt: workflow.updated_at,
             githubUrl: workflow.html_url,
             extractionMethod: 'error'
         };
+    }
+}
+
+// Extract pricing data from GitHub Action logs
+function extractPricingFromLogs(logsText) {
+    try {
+        console.log(`💰 PARSING LOGS: Searching for pricing data in logs...`);
+        
+        // Look for the pricing data output line
+        const pricingOutputPattern = /💰 PRICING_DATA_OUTPUT:\s*({.*})/;
+        const match = logsText.match(pricingOutputPattern);
+        
+        if (!match) {
+            console.log(`❌ No pricing data pattern found in logs`);
+            return null;
+        }
+
+        console.log(`💰 Found pricing data line: ${match[0].substring(0, 200)}...`);
+        
+        // Parse the JSON data
+        const jsonString = match[1];
+        const pricingData = JSON.parse(jsonString);
+        
+        console.log(`💰 Successfully parsed pricing JSON:`, {
+            status: pricingData.pricing_status,
+            borrower: pricingData.borrower_name,
+            totalOptions: pricingData.total_options,
+            bestRate: pricingData.best_rate_option?.interest_rate
+        });
+        
+        return pricingData;
+        
+    } catch (error) {
+        console.error(`💥 Error parsing pricing from logs:`, error);
+        return null;
     }
 }
 
@@ -222,39 +270,33 @@ function extractLoanIndexFromJobName(jobs) {
         }
     }
     
+    return null;
+}
+
+// Helper function to extract loan index from workflow data
+function extractLoanIndexFromWorkflow(workflow) {
+    // Try to extract from workflow name or head commit message
+    const sources = [
+        workflow.name,
+        workflow.display_title,
+        workflow.head_commit?.message
+    ].filter(Boolean);
+    
+    for (const source of sources) {
+        const patterns = [
+            /loan[:\s]*(\d+)/i,
+            /process[:\s]*(\d+)/i,
+            /price[:\s]*(\d+)/i,
+            /\b(\d+)\b/
+        ];
+        
+        for (const pattern of patterns) {
+            const match = source.match(pattern);
+            if (match) {
+                return parseInt(match[1]);
+            }
+        }
+    }
+    
     return 'Unknown';
-}
-
-// Generate realistic interest rates for demo
-function generateRealisticRate() {
-    // Generate rates between 6.5% and 9.5% with realistic distribution
-    const baseRate = 7.5;
-    const variation = (Math.random() - 0.5) * 2; // -1 to +1
-    const rate = baseRate + variation;
-    return Math.round(rate * 100) / 100; // Round to 2 decimals
-}
-
-// Generate realistic investor names
-function generateRealisticInvestor() {
-    const investors = [
-        'Prime Investor',
-        'Non-QM Investor', 
-        'Alt-A Investor',
-        'DSCR Investor',
-        'Foreign National Investor',
-        'Bank Statement Investor'
-    ];
-    return investors[Math.floor(Math.random() * investors.length)];
-}
-
-// Generate realistic loan amounts
-function generateRealisticLoanAmount() {
-    const amounts = [350000, 425000, 500000, 675000, 750000, 850000, 1000000];
-    return amounts[Math.floor(Math.random() * amounts.length)];
-}
-
-// Generate realistic property types
-function generateRealisticPropertyType() {
-    const types = ['SFR', 'Condo', 'Townhome', '2-4 Unit', 'Manufactured'];
-    return types[Math.floor(Math.random() * types.length)];
 }
