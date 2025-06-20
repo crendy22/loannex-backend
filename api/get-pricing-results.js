@@ -168,6 +168,10 @@ async function extractRealPricingData(owner, repo, token, workflow) {
         // Extract the pricing data from logs
         const pricingData = extractPricingFromLogs(logsText);
         
+        console.log(`💰 LOG SAMPLE: First 500 chars of logs:`, logsText.substring(0, 500));
+        console.log(`💰 SEARCHING FOR: "💰 PRICING_DATA_OUTPUT:"`);
+        console.log(`💰 PATTERN FOUND:`, logsText.includes('💰 PRICING_DATA_OUTPUT:'));
+        
         if (!pricingData) {
             throw new Error('No pricing data found in logs');
         }
