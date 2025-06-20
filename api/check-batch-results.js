@@ -1,4 +1,4 @@
-// FIXED: Handle GitHub Actions logs properly (they're ZIP files, not gzip)
+// ENHANCED: Debug version to find why workflows aren't being detected
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
             });
         }
 
-        console.log(`🔍 ZIP FIX: Checking batch results since: ${batchStartTime}`);
+        console.log(`🔍 DEBUG: Checking batch results since: ${batchStartTime}`);
 
         // GitHub repository details
         const GITHUB_OWNER = 'crendy22';
@@ -37,6 +37,9 @@ export default async function handler(req, res) {
 
         // Get workflows since batch started
         const cutoffTime = new Date(batchStartTime);
+        console.log(`🔍 DEBUG: Cutoff time: ${cutoffTime.toISOString()}`);
+        console.log(`🔍 DEBUG: Current time: ${new Date().toISOString()}`);
+
         const runsResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs?per_page=50`, {
             headers: {
                 'Authorization': `Bearer ${GITHUB_TOKEN}`,
@@ -45,10 +48,27 @@ export default async function handler(req, res) {
         });
 
         if (!runsResponse.ok) {
-            throw new Error(`Failed to get workflow runs: ${runsResponse.status}`);
+            const errorText = await runsResponse.text();
+            console.error(`❌ GitHub API Error: ${runsResponse.status} - ${errorText}`);
+            throw new Error(`Failed to get workflow runs: ${runsResponse.status} - ${errorText}`);
         }
 
         const runsData = await runsResponse.json();
+        console.log(`🔍 DEBUG: Total workflows found: ${runsData.workflow_runs.length}`);
+        
+        // Show first 3 workflows with detailed time comparison
+        console.log('🔍 DEBUG: Recent workflows:');
+        runsData.workflow_runs.slice(0, 3).forEach((run, index) => {
+            const runTime = new Date(run.created_at);
+            const timeDiffMinutes = (runTime - cutoffTime) / 1000 / 60;
+            const isAfterCutoff = runTime >= cutoffTime;
+            console.log(`  ${index + 1}. ID: ${run.id}`);
+            console.log(`     Created: ${run.created_at}`);
+            console.log(`     Time diff: ${timeDiffMinutes.toFixed(2)} minutes from cutoff`);
+            console.log(`     Status: ${run.status}, Conclusion: ${run.conclusion}`);
+            console.log(`     After cutoff: ${isAfterCutoff}`);
+            console.log(`     Event: ${run.event}`);
+        });
         
         // Filter workflows from this batch
         const batchWorkflows = runsData.workflow_runs
@@ -65,6 +85,16 @@ export default async function handler(req, res) {
         const runningWorkflows = batchWorkflows.filter(run => run.status !== 'completed');
 
         console.log(`✅ Completed: ${completedWorkflows.length}, 🔄 Still running: ${runningWorkflows.length}`);
+
+        // Show details of what we found
+        if (batchWorkflows.length === 0) {
+            console.log('❌ NO WORKFLOWS FOUND - Time filtering excluded everything');
+        } else {
+            console.log('📋 Batch workflows details:');
+            batchWorkflows.forEach(run => {
+                console.log(`  - ${run.id}: ${run.created_at} (${run.status})`);
+            });
+        }
 
         // Analyze each completed workflow - TRY DIFFERENT APPROACHES
         const results = [];
