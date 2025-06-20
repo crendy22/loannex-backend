@@ -222,20 +222,37 @@ async function extractRealPricingData(owner, repo, token, workflow) {
 }
 
 // Extract pricing data from GitHub Action logs
+// Extract pricing data from GitHub Action logs
 function extractPricingFromLogs(logsText) {
     try {
         console.log(`💰 PARSING LOGS: Searching for pricing data in logs...`);
         
-        // Look for the pricing data output line
-        const pricingOutputPattern = /💰 PRICING_DATA_OUTPUT:\s*(\{"pricing_status".*?\})\s*$/m;
-        const match = logsText.match(pricingOutputPattern);
-        
-        if (!match) {
-            console.log(`❌ No pricing data pattern found in logs`);
+        // Look for the pricing data output line - but exclude Python code lines
+        const lines = logsText.split('\n');
+        let pricingDataLine = null;
+
+        for (const line of lines) {
+            if (line.includes('💰 PRICING_DATA_OUTPUT:') && 
+                !line.includes('json.dumps') && 
+                !line.includes('print(f"')) {
+                pricingDataLine = line;
+                break;
+            }
+        }
+
+        if (!pricingDataLine) {
+            console.log(`❌ No actual pricing output line found`);
             return null;
         }
 
-        console.log(`💰 Found pricing data line: ${match[0].substring(0, 200)}...`);
+        console.log(`💰 Found pricing data line: ${pricingDataLine.substring(0, 200)}...`);
+        
+        const match = pricingDataLine.match(/💰 PRICING_DATA_OUTPUT:\s*(\{.*\})/);
+        
+        if (!match) {
+            console.log(`❌ No JSON pattern found in pricing line`);
+            return null;
+        }
         
         // Parse the JSON data
         const jsonString = match[1];
