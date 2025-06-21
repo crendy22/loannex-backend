@@ -1,5 +1,5 @@
 // /api/get-pricing-results.js
-// FIXED: Get REAL pricing results from GitHub workflow logs
+// FIXED: Get ALL pricing results from GitHub workflow logs
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -38,28 +38,55 @@ export default async function handler(req, res) {
 
         // Get workflows since batch started (with 30-second buffer)
         const cutoffTime = new Date(new Date(batchStartTime).getTime() - 30000);
-        const runsResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs?per_page=50`, {
-            headers: {
-                'Authorization': `Bearer ${GITHUB_TOKEN}`,
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        });
-
-        if (!runsResponse.ok) {
-            throw new Error(`Failed to get workflow runs: ${runsResponse.status}`);
-        }
-
-        const runsData = await runsResponse.json();
         
-        // Filter workflows from this batch - look for pricing workflows
-        const batchWorkflows = runsData.workflow_runs
-            .filter(run => {
+        // FIXED: Get ALL workflows by fetching multiple pages if needed
+        let allWorkflows = [];
+        let page = 1;
+        let hasMore = true;
+        
+        while (hasMore && page <= 5) { // Limit to 5 pages for safety
+            const runsResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs?per_page=100&page=${page}`, {
+                headers: {
+                    'Authorization': `Bearer ${GITHUB_TOKEN}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+            });
+
+            if (!runsResponse.ok) {
+                throw new Error(`Failed to get workflow runs: ${runsResponse.status}`);
+            }
+
+            const runsData = await runsResponse.json();
+            
+            // Filter workflows from this batch
+            const pageWorkflows = runsData.workflow_runs.filter(run => {
                 const runTime = new Date(run.created_at);
                 return runTime >= cutoffTime;
-            })
-            .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            });
+            
+            allWorkflows = allWorkflows.concat(pageWorkflows);
+            
+            // Check if we need to fetch more pages
+            // If the oldest workflow on this page is still newer than our cutoff, fetch next page
+            if (runsData.workflow_runs.length === 100) {
+                const oldestOnPage = runsData.workflow_runs[runsData.workflow_runs.length - 1];
+                const oldestTime = new Date(oldestOnPage.created_at);
+                
+                if (oldestTime >= cutoffTime) {
+                    page++;
+                    console.log(`💰 Fetching page ${page} - found ${allWorkflows.length} workflows so far`);
+                } else {
+                    hasMore = false;
+                }
+            } else {
+                hasMore = false;
+            }
+        }
+        
+        // Sort by creation time (oldest first)
+        const batchWorkflows = allWorkflows.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-        console.log(`💰 Found ${batchWorkflows.length} workflows since batch start`);
+        console.log(`💰 Found ${batchWorkflows.length} total workflows since batch start`);
 
         // Separate completed vs still running
         const completedWorkflows = batchWorkflows.filter(run => run.status === 'completed');
@@ -69,24 +96,36 @@ export default async function handler(req, res) {
 
         // Extract REAL pricing data from each completed workflow
         const pricingResults = [];
-        for (const workflow of completedWorkflows) {
-            try {
-                const pricingData = await extractRealPricingData(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
-                if (pricingData) {
-                    pricingResults.push(pricingData);
+        
+        // Process in batches to avoid overwhelming the API
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < completedWorkflows.length; i += BATCH_SIZE) {
+            const batch = completedWorkflows.slice(i, i + BATCH_SIZE);
+            
+            const batchPromises = batch.map(async (workflow) => {
+                try {
+                    const pricingData = await extractRealPricingData(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
+                    if (pricingData) {
+                        return pricingData;
+                    }
+                } catch (error) {
+                    console.error(`❌ Error extracting pricing from workflow ${workflow.id}:`, error);
+                    return {
+                        workflowId: workflow.id,
+                        loanIndex: 'Unknown',
+                        borrowerName: 'Unknown',
+                        pricingStatus: 'error',
+                        errorMessage: 'Failed to extract pricing data',
+                        completedAt: workflow.updated_at,
+                        githubUrl: workflow.html_url
+                    };
                 }
-            } catch (error) {
-                console.error(`❌ Error extracting pricing from workflow ${workflow.id}:`, error);
-                pricingResults.push({
-                    workflowId: workflow.id,
-                    loanIndex: 'Unknown',
-                    borrowerName: 'Unknown',
-                    pricingStatus: 'error',
-                    errorMessage: 'Failed to extract pricing data',
-                    completedAt: workflow.updated_at,
-                    githubUrl: workflow.html_url
-                });
-            }
+            });
+            
+            const batchResults = await Promise.all(batchPromises);
+            pricingResults.push(...batchResults.filter(Boolean));
+            
+            console.log(`💰 Processed batch ${Math.floor(i/BATCH_SIZE) + 1}, total results: ${pricingResults.length}`);
         }
 
         // Check if all pricing is complete (no more workflows running)
@@ -198,6 +237,7 @@ async function extractRealPricingData(owner, repo, token, workflow) {
             investor: pricingData.best_rate_option?.program_name || 'Unknown', // Use program name as investor
             loanAmount: pricingData.loan_amount,
             propertyType: pricingData.property_type,
+            amortizingType: pricingData.amortizing_type || 'Unknown',
             totalOptions: pricingData.total_options || 0,
             allPricingOptions: pricingData.pricing_options || [],
             errorMessage: pricingData.error_message || null,
@@ -221,7 +261,6 @@ async function extractRealPricingData(owner, repo, token, workflow) {
     }
 }
 
-// Extract pricing data from GitHub Action logs
 // Extract pricing data from GitHub Action logs
 function extractPricingFromLogs(logsText) {
     try {
