@@ -16,7 +16,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { loanData, loanIndex, credentials } = req.body;
+        const { loanData, loanIndex, credentials, shouldSave } = req.body;
         
         if (!loanData || !credentials) {
             return res.status(400).json({ 
@@ -52,6 +52,7 @@ export default async function handler(req, res) {
                     loan_index: loanIndex,
                     credentials: credentials,
                     pricing_only: true, // NEW: Flag to stop after pricing
+                    should_save: shouldSave || false, // NEW: Add this line
                     timestamp: new Date().toISOString()
                 }
             })
