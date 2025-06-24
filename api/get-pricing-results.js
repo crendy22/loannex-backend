@@ -241,6 +241,8 @@ async function extractRealPricingData(owner, repo, token, workflow) {
             totalOptions: pricingData.total_options || 0,
             allPricingOptions: pricingData.pricing_options || [],
             errorMessage: pricingData.error_message || null,
+            nex_id: pricingData.nex_id || null,            
+            save_status: pricingData.save_status || null, 
             completedAt: workflow.updated_at,
             githubUrl: workflow.html_url,
             extractionMethod: 'real_log_extraction'
