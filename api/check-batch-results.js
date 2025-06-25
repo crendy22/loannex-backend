@@ -188,86 +188,73 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
             console.log(`Is ZIP? ${firstBytes[0] === 0x50 && firstBytes[1] === 0x4B ? 'YES' : 'NO'}`);
             // 🔴 END OF DEBUG CODE 🔴
             
-            // Convert to text (logs are in zip format, but we'll try to extract readable parts)
-            const logsText = new TextDecoder('utf-8', { fatal: false }).decode(logsBuffer);
+                        // Convert to string (even if it's a ZIP, we'll search for patterns)
+            const rawData = Buffer.from(logsBuffer).toString('binary');
             
-            // Extract loan information from logs
-            const loanIndex = extractLoanIndex(logsText, workflow);
-            const borrowerName = extractBorrowerName(logsText);
-            const nexId = extractNexId(logsText);
-            
-            // Check for lock success patterns
+            // Look for our success indicators directly
             let locked = false;
+            let nexId = null;
+            let borrowerName = 'Unknown';
             let errorMessage = null;
-            let successPattern = '';
             
-            // Check for LOCK_RESULT JSON
-            const lockResultMatch = logsText.match(/🔒 LOCK_RESULT: ({.*})/);
-            if (lockResultMatch) {
-                try {
-                    const lockResult = JSON.parse(lockResultMatch[1]);
-                    locked = lockResult.lock_status === 'success';
-                    errorMessage = lockResult.message || lockResult.failure_reason;
-                    successPattern = 'LOCK_RESULT JSON found';
-                    console.log(`📊 Found LOCK_RESULT: ${JSON.stringify(lockResult)}`);
-                } catch (e) {
-                    console.log('Failed to parse LOCK_RESULT JSON');
-                }
-            }
-            
-            // Fallback: Check for success patterns
-            if (!lockResultMatch) {
-                const successPatterns = [
-                    { pattern: /SUCCESS: (AUTO-PROCESS|SELECTIVE-LOCK) completed/i, name: 'SUCCESS completed' },
-                    { pattern: /Submit Lock button clicked successfully/i, name: 'Submit Lock clicked' },
-                    { pattern: /SUCCESS: LOAN LOCKED/i, name: 'LOAN LOCKED' },
-                    { pattern: /Lock completed successfully/i, name: 'Lock completed' }
-                ];
-                
-                for (const { pattern, name } of successPatterns) {
-                    if (pattern.test(logsText)) {
-                        locked = true;
-                        successPattern = name;
-                        console.log(`✅ Found success pattern: ${name}`);
-                        break;
+            // Search for LOCK_RESULT JSON
+            if (rawData.includes('LOCK_RESULT')) {
+                const match = rawData.match(/LOCK_RESULT[^{]*({[^}]+})/);
+                if (match) {
+                    try {
+                        const lockResult = JSON.parse(match[1]);
+                        locked = lockResult.lock_status === 'success';
+                        nexId = lockResult.nex_id || lockResult.nexId;
+                        borrowerName = lockResult.borrower_name || 'Unknown';
+                        errorMessage = lockResult.message || lockResult.failure_reason;
+                        console.log(`✅ Found LOCK_RESULT: ${JSON.stringify(lockResult)}`);
+                    } catch (e) {
+                        console.log('Found LOCK_RESULT but could not parse');
                     }
                 }
             }
             
-            // Check for failure patterns if not locked
-            if (!locked && !errorMessage) {
-                const failurePatterns = [
-                    { pattern: /FAILED: (AUTO-PROCESS|SELECTIVE-LOCK) processing failed/i, extract: true },
-                    { pattern: /Could not find or click Get Price button/i, message: 'Failed to get pricing' },
-                    { pattern: /Login failed/i, message: 'Login failed' },
-                    { pattern: /No loans available after filtering/i, message: 'No loans available after filtering' },
-                    { pattern: /Could not click initial Lock button/i, message: 'Could not click Lock button' },
-                    { pattern: /ERROR: (.+)/i, extract: true }
-                ];
-                
-                for (const failure of failurePatterns) {
-                    const match = logsText.match(failure.pattern);
-                    if (match) {
-                        errorMessage = failure.extract && match[1] ? match[1] : failure.message;
-                        console.log(`❌ Found failure: ${errorMessage}`);
-                        break;
-                    }
+            // Fallback: Look for SUCCESS pattern
+            if (!locked && rawData.includes('SUCCESS: SELECTIVE-LOCK completed')) {
+                locked = true;
+                console.log('✅ Found SUCCESS pattern');
+            }
+            
+            // Also check for AUTO-PROCESS success
+            if (!locked && rawData.includes('SUCCESS: AUTO-PROCESS completed')) {
+                locked = true;
+                console.log('✅ Found AUTO-PROCESS SUCCESS pattern');
+            }
+            
+            // Try to extract loan index from patterns in the data
+            let loanIndex = 'Unknown';
+            const loanIndexMatch = rawData.match(/Loan (\d+):/i) || rawData.match(/loan[_\s]+(\d+)/i);
+            if (loanIndexMatch) {
+                loanIndex = parseInt(loanIndexMatch[1]);
+            }
+            
+            // If we still don't have borrower name, try to extract it
+            if (borrowerName === 'Unknown') {
+                const borrowerMatch = rawData.match(/Loan to lock:[:\s]+([^-\n]+)/i);
+                if (borrowerMatch) {
+                    borrowerName = borrowerMatch[1].trim();
                 }
             }
             
-            console.log(`📊 ENHANCED ANALYSIS: loan=${loanIndex}, borrower=${borrowerName}, nexId=${nexId}, locked=${locked}`);
+            console.log(`📊 FINAL: locked=${locked}, nexId=${nexId}, borrower=${borrowerName}, loanIndex=${loanIndex}`);
             
             return {
                 workflowId: workflow.id,
                 loanIndex: loanIndex,
                 borrowerName: borrowerName,
-                nexId: nexId,  // ADD THIS
+                nexId: nexId,
+                nex_id: nexId,  // Include both formats
                 locked: locked,
                 errorMessage: errorMessage,
                 completedAt: workflow.updated_at,
                 githubUrl: workflow.html_url,
-                status: 'log_analysis',
-                successPattern: successPattern
+                status: 'pattern_search',
+                successPattern: locked ? 'LOCK_RESULT found' : 'No success pattern found'
             };
             
         } else {
