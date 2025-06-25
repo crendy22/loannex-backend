@@ -287,7 +287,19 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
                     }
                 }
             }
+
+                        // Very specific pattern that appears in successful locks
+            if (!locked && rawData.includes('Submit Lock button clicked successfully') && 
+                rawData.includes('after_submit.png')) {
+                locked = true;
+                console.log('✅ Found lock completion pattern (button click + screenshot)');
+            }
             
+            // Also check for failed lock attempts
+            if (!locked && rawData.includes('Failed to click Submit Lock button')) {
+                errorMessage = 'Failed to click Submit Lock button';
+                console.log('❌ Found lock failure pattern');
+            }
             // Try to extract loan index from patterns in the data
             let loanIndex = 'Unknown';
             const loanIndexMatch = rawData.match(/Loan (\d+):/i) || rawData.match(/loan[_\s]+(\d+)/i);
