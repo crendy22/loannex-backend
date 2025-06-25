@@ -1,5 +1,5 @@
 // /api/trigger-selective-locks.js
-// NEW: Lock only selected loans after pricing review
+// UPDATED: Lock only selected loans after pricing review with NexID support
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -25,7 +25,16 @@ export default async function handler(req, res) {
             });
         }
 
-        console.log(`🔒 SELECTIVE LOCK: Processing loan ${loanIndex + 1} for user: ${credentials.username} - SELECTED FOR LOCKING`);
+        // NEW: Check for NexID in loan data
+        const nexId = loanData.nex_id || loanData.nexId || '';
+        if (!nexId) {
+            console.log(`⚠️ WARNING: No NexID found for loan ${loanIndex + 1}. Loan data:`, Object.keys(loanData));
+            // Don't fail completely, but log the issue
+        }
+
+        console.log(`🔒 SELECTIVE LOCK: Processing loan ${loanIndex + 1} for user: ${credentials.username}`);
+        console.log(`🔒 NexID: ${nexId || 'NOT FOUND'}`);
+        console.log(`🔒 Borrower: ${loanData.firstName || loanData['First Name'] || ''} ${loanData.lastName || loanData['Last Name'] || ''}`);
 
         // GitHub repository details
         const GITHUB_OWNER = 'crendy22';
@@ -35,6 +44,20 @@ export default async function handler(req, res) {
         if (!GITHUB_TOKEN) {
             throw new Error('GitHub token not configured in environment variables');
         }
+
+        // NEW: Enhanced loan data with NexID for the automation script
+        const enhancedLoanData = {
+            ...loanData,
+            nex_id: nexId, // Ensure NexID is included with consistent naming
+            nexId: nexId,  // Backup naming convention
+            // Normalize field names for the automation script
+            'First Name': loanData['First Name'] || loanData.firstName || '',
+            'Last Name': loanData['Last Name'] || loanData.lastName || '',
+            'Loan Amount': loanData['Loan Amount'] || loanData.loanAmount || '',
+            // Add any other field normalizations needed
+            selective_lock_mode: true, // Flag for the automation script
+            pricing_already_done: true // Flag indicating pricing was already completed
+        };
 
         // Trigger GitHub Actions workflow for SELECTIVE LOCKING
         console.log('🔒 Triggering GitHub Actions workflow for selective lock...');
@@ -46,13 +69,15 @@ export default async function handler(req, res) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                event_type: 'selective-lock', // NEW: Different event type for selective locks
+                event_type: 'selective-lock', // Event type for selective locks
                 client_payload: {
-                    loan_data: JSON.stringify(loanData),
+                    loan_data: JSON.stringify(enhancedLoanData), // NEW: Enhanced data with NexID
                     loan_index: loanIndex,
                     credentials: credentials,
-                    selective_lock: true, // NEW: Flag for selective lock mode
-                    user_approved: true, // NEW: Flag indicating user reviewed and approved
+                    selective_lock: true,
+                    user_approved: true,
+                    nex_id: nexId, // NEW: Explicit NexID field
+                    workflow_type: 'selective-lock', // NEW: Explicit workflow type
                     timestamp: new Date().toISOString()
                 }
             })
@@ -63,7 +88,7 @@ export default async function handler(req, res) {
             throw new Error(`GitHub dispatch failed: ${dispatchResponse.status} - ${errorText}`);
         }
 
-        console.log(`✅ Selective lock workflow triggered successfully for loan ${loanIndex + 1}`);
+        console.log(`✅ Selective lock workflow triggered successfully for loan ${loanIndex + 1} (NexID: ${nexId || 'N/A'})`);
 
         // Wait a moment to get the workflow run ID
         await new Promise(resolve => setTimeout(resolve, 3000));
@@ -100,16 +125,22 @@ export default async function handler(req, res) {
         // Return SUCCESS immediately for selective lock mode
         return res.status(200).json({
             success: true,
-            message: 'Selective lock workflow triggered successfully',
+            message: nexId ? 
+                `Selective lock workflow triggered for NexID: ${nexId}` : 
+                'Selective lock workflow triggered (no NexID found)',
             workflowStatus: {
                 success: false, // Will be determined later via Check Results
                 message: 'Selective lock automation started - workflow is now running',
-                details: 'User-approved loan lock triggered successfully. Use "Check Final Results" for actual lock status.',
+                details: nexId ? 
+                    `User-approved loan lock triggered for NexID: ${nexId}. Use "Check Final Results" for actual lock status.` :
+                    'User-approved loan lock triggered (warning: no NexID found). Use "Check Final Results" for actual lock status.',
                 runUrl: runUrl,
                 conclusion: 'selective_lock_triggered',
-                selectiveLock: true // NEW: Flag to indicate this is selective lock mode
+                selectiveLock: true,
+                nexId: nexId // NEW: Include NexID in response
             },
             loanIndex: loanIndex,
+            nexId: nexId, // NEW: Include NexID in response
             timestamp: new Date().toISOString()
         });
 
