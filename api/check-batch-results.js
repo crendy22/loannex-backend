@@ -81,8 +81,13 @@ export default async function handler(req, res) {
         console.log(`📊 Found ${batchWorkflows.length} workflows since batch start`);
 
         // Separate completed vs still running
-        const completedWorkflows = batchWorkflows.filter(run => run.status === 'completed');
-        const runningWorkflows = batchWorkflows.filter(run => run.status !== 'completed');
+        // IMPORTANT: Only consider workflows completed if they have a conclusion
+        const completedWorkflows = batchWorkflows.filter(run => 
+            run.status === 'completed' && run.conclusion !== null
+        );
+        const runningWorkflows = batchWorkflows.filter(run => 
+            run.status !== 'completed' || run.conclusion === null
+        );
 
         console.log(`✅ Completed: ${completedWorkflows.length}, 🔄 Still running: ${runningWorkflows.length}`);
 
