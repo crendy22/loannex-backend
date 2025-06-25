@@ -220,10 +220,13 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
                 console.log('✅ Found SUCCESS pattern');
             }
             
-            // Also check for AUTO-PROCESS success
-            if (!locked && rawData.includes('SUCCESS: AUTO-PROCESS completed')) {
-                locked = true;
-                console.log('✅ Found AUTO-PROCESS SUCCESS pattern');
+            // Check for AUTO-PROCESS success with flexible pattern
+            if (!locked) {
+                const autoProcessMatch = rawData.match(/SUCCESS:\s*AUTO-PROCESS\s+(?:loan\s+)?(?:locked|completed)/i);
+                if (autoProcessMatch) {
+                    locked = true;
+                    console.log(`✅ Found AUTO-PROCESS SUCCESS pattern: "${autoProcessMatch[0]}"`);
+                }
             }
             
             // Try to extract loan index from patterns in the data
