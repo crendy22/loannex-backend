@@ -1,4 +1,4 @@
-// ENHANCED: Debug version to find why workflows aren't being detected
+// ENHANCED: Complete version with proper log parsing and NexID extraction
 
 export default async function handler(req, res) {
     // Set CORS headers
@@ -96,11 +96,11 @@ export default async function handler(req, res) {
             });
         }
 
-        // Analyze each completed workflow - TRY DIFFERENT APPROACHES
+        // Analyze each completed workflow - USE PROPER LOG ANALYSIS
         const results = [];
         for (const workflow of completedWorkflows) {
             try {
-                const loanResult = await analyzeWorkflowMultipleWays(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
+                const loanResult = await analyzeWorkflowLogs(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN, workflow);
                 if (loanResult) {
                     results.push(loanResult);
                 }
@@ -110,6 +110,7 @@ export default async function handler(req, res) {
                     workflowId: workflow.id,
                     loanIndex: 'Unknown',
                     borrowerName: 'Unknown',
+                    nexId: null,
                     locked: false,
                     errorMessage: 'Failed to analyze workflow results',
                     completedAt: workflow.updated_at,
@@ -125,7 +126,7 @@ export default async function handler(req, res) {
         const successRate = results.length > 0 ? Math.round((successfulLocks / results.length) * 100) : 0;
         const stillProcessing = runningWorkflows.length;
 
-        console.log(`📈 FINAL MULTI-APPROACH: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
+        console.log(`📈 FINAL RESULTS: ${successfulLocks} locked, ${failedLocks} failed, ${stillProcessing} still processing`);
 
         return res.status(200).json({
             success: true,
@@ -152,7 +153,189 @@ export default async function handler(req, res) {
     }
 }
 
-// TRY MULTIPLE APPROACHES to get the logs
+// MAIN FUNCTION: Analyze workflow logs to extract all information
+async function analyzeWorkflowLogs(owner, repo, token, workflow) {
+    try {
+        console.log(`🔍 Analyzing workflow ${workflow.id}`);
+        
+        // Get the logs URL
+        const logsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflow.id}/logs`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github.v3+json'
+            },
+            redirect: 'manual'
+        });
+
+        if (logsResponse.status === 302) {
+            const logsUrl = logsResponse.headers.get('location');
+            
+            // Download the logs
+            const logsDownload = await fetch(logsUrl);
+            const logsBuffer = await logsDownload.arrayBuffer();
+            
+            // Convert to text (logs are in zip format, but we'll try to extract readable parts)
+            const logsText = new TextDecoder('utf-8', { fatal: false }).decode(logsBuffer);
+            
+            // Extract loan information from logs
+            const loanIndex = extractLoanIndex(logsText, workflow);
+            const borrowerName = extractBorrowerName(logsText);
+            const nexId = extractNexId(logsText);
+            
+            // Check for lock success patterns
+            let locked = false;
+            let errorMessage = null;
+            let successPattern = '';
+            
+            // Check for LOCK_RESULT JSON
+            const lockResultMatch = logsText.match(/🔒 LOCK_RESULT: ({.*})/);
+            if (lockResultMatch) {
+                try {
+                    const lockResult = JSON.parse(lockResultMatch[1]);
+                    locked = lockResult.lock_status === 'success';
+                    errorMessage = lockResult.message || lockResult.failure_reason;
+                    successPattern = 'LOCK_RESULT JSON found';
+                    console.log(`📊 Found LOCK_RESULT: ${JSON.stringify(lockResult)}`);
+                } catch (e) {
+                    console.log('Failed to parse LOCK_RESULT JSON');
+                }
+            }
+            
+            // Fallback: Check for success patterns
+            if (!lockResultMatch) {
+                const successPatterns = [
+                    { pattern: /SUCCESS: (AUTO-PROCESS|SELECTIVE-LOCK) completed/i, name: 'SUCCESS completed' },
+                    { pattern: /Submit Lock button clicked successfully/i, name: 'Submit Lock clicked' },
+                    { pattern: /SUCCESS: LOAN LOCKED/i, name: 'LOAN LOCKED' },
+                    { pattern: /Lock completed successfully/i, name: 'Lock completed' }
+                ];
+                
+                for (const { pattern, name } of successPatterns) {
+                    if (pattern.test(logsText)) {
+                        locked = true;
+                        successPattern = name;
+                        console.log(`✅ Found success pattern: ${name}`);
+                        break;
+                    }
+                }
+            }
+            
+            // Check for failure patterns if not locked
+            if (!locked && !errorMessage) {
+                const failurePatterns = [
+                    { pattern: /FAILED: (AUTO-PROCESS|SELECTIVE-LOCK) processing failed/i, extract: true },
+                    { pattern: /Could not find or click Get Price button/i, message: 'Failed to get pricing' },
+                    { pattern: /Login failed/i, message: 'Login failed' },
+                    { pattern: /No loans available after filtering/i, message: 'No loans available after filtering' },
+                    { pattern: /Could not click initial Lock button/i, message: 'Could not click Lock button' },
+                    { pattern: /ERROR: (.+)/i, extract: true }
+                ];
+                
+                for (const failure of failurePatterns) {
+                    const match = logsText.match(failure.pattern);
+                    if (match) {
+                        errorMessage = failure.extract && match[1] ? match[1] : failure.message;
+                        console.log(`❌ Found failure: ${errorMessage}`);
+                        break;
+                    }
+                }
+            }
+            
+            console.log(`📊 ENHANCED ANALYSIS: loan=${loanIndex}, borrower=${borrowerName}, nexId=${nexId}, locked=${locked}`);
+            
+            return {
+                workflowId: workflow.id,
+                loanIndex: loanIndex,
+                borrowerName: borrowerName,
+                nexId: nexId,  // ADD THIS
+                locked: locked,
+                errorMessage: errorMessage,
+                completedAt: workflow.updated_at,
+                githubUrl: workflow.html_url,
+                status: 'log_analysis',
+                successPattern: successPattern
+            };
+            
+        } else {
+            console.log(`❌ Could not get logs URL for workflow ${workflow.id} (status: ${logsResponse.status})`);
+            // Fall back to the multi-approach analysis
+            return await analyzeWorkflowMultipleWays(owner, repo, token, workflow);
+        }
+        
+    } catch (error) {
+        console.error(`Error analyzing workflow ${workflow.id}:`, error);
+        // Fall back to the multi-approach analysis
+        return await analyzeWorkflowMultipleWays(owner, repo, token, workflow);
+    }
+}
+
+// Helper function to extract NexID from logs
+function extractNexId(logsText) {
+    // Multiple patterns to find NexID
+    const patterns = [
+        /Successfully extracted NexID: ([A-Z0-9-]+)/i,
+        /NexID[:\s]+([A-Z0-9-]+)/i,
+        /nex_id["\s:]+["']?([A-Z0-9-]+)/i,
+        /"nex_id":\s*"([A-Z0-9-]+)"/i
+    ];
+    
+    for (const pattern of patterns) {
+        const match = logsText.match(pattern);
+        if (match && match[1] && match[1] !== 'null' && match[1] !== 'Not Saved') {
+            console.log(`🔍 Found NexID: ${match[1]}`);
+            return match[1];
+        }
+    }
+    
+    return null;
+}
+
+// Helper function to extract loan index
+function extractLoanIndex(logsText, workflow) {
+    // Try various patterns
+    const patterns = [
+        /Loan (\d+):/i,
+        /loan[_\s]+(\d+)/i,
+        /loanIndex["\s:]+(\d+)/i,
+        /Triggering[^0-9]+(\d+)[^0-9]+of/i
+    ];
+    
+    for (const pattern of patterns) {
+        const match = logsText.match(pattern);
+        if (match) {
+            return parseInt(match[1]);
+        }
+    }
+    
+    // Try to get from workflow if not in logs
+    const workflowMatch = workflow.name?.match(/\d+/);
+    if (workflowMatch) {
+        return parseInt(workflowMatch[0]);
+    }
+    
+    return 'Unknown';
+}
+
+// Helper function to extract borrower name
+function extractBorrowerName(logsText) {
+    const patterns = [
+        /Borrower Name[:\s]+([^\n]+)/i,
+        /borrower[_\s]+name["\s:]+["']?([^"'\n]+)/i,
+        /Processing loan for[:\s]+([^\n]+)/i,
+        /Loan to lock:[:\s]+([^-\n]+)/i
+    ];
+    
+    for (const pattern of patterns) {
+        const match = logsText.match(pattern);
+        if (match && match[1]) {
+            return match[1].trim();
+        }
+    }
+    
+    return 'Unknown';
+}
+
+// FALLBACK: Try multiple approaches if logs aren't available
 async function analyzeWorkflowMultipleWays(owner, repo, token, workflow) {
     try {
         console.log(`🔍 MULTI-APPROACH: Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
@@ -200,6 +383,7 @@ async function analyzeWorkflowMultipleWays(owner, repo, token, workflow) {
                 workflowId: workflow.id,
                 loanIndex: loanIndex,
                 borrowerName: borrowerName,
+                nexId: null,  // Can't extract from jobs
                 locked: locked,
                 errorMessage: errorMessage,
                 completedAt: workflow.updated_at,
@@ -222,6 +406,7 @@ async function analyzeWorkflowMultipleWays(owner, repo, token, workflow) {
             workflowId: workflow.id,
             loanIndex: 'Unknown',
             borrowerName: 'Unknown',
+            nexId: null,
             locked: locked,
             errorMessage: errorMessage,
             completedAt: workflow.updated_at,
@@ -236,6 +421,7 @@ async function analyzeWorkflowMultipleWays(owner, repo, token, workflow) {
             workflowId: workflow.id,
             loanIndex: 'Unknown',
             borrowerName: 'Unknown',
+            nexId: null,
             locked: false,
             errorMessage: `Analysis error: ${error.message}`,
             completedAt: workflow.updated_at,
