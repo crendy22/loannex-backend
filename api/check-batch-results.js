@@ -175,47 +175,16 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
         if (logsResponse.status === 302) {
             const logsUrl = logsResponse.headers.get('location');
             
+                        // Download the logs
+            const logsDownload = await fetch(logsUrl);
+            const logsBuffer = await logsDownload.arrayBuffer();
             
-                    // Download the logs
-        const logsDownload = await fetch(logsUrl);
-        const logsBuffer = await logsDownload.arrayBuffer();
-        
-        console.log(`📦 Downloaded ${logsBuffer.byteLength} bytes`);
-        
-        // Check if it's a ZIP file and decompress
-        const firstBytes = new Uint8Array(logsBuffer.slice(0, 4));
-        let rawData;
-        
-        if (firstBytes[0] === 0x50 && firstBytes[1] === 0x4B) {
-            // It's a ZIP file - need to unzip it
-            console.log('📦 Logs are zipped, decompressing...');
+            console.log(`📦 Downloaded ${logsBuffer.byteLength} bytes`);
             
-            // For Node.js environment (Vercel)
-            const buffer = Buffer.from(logsBuffer);
-            try {
-                // GitHub Actions logs are usually in a specific structure
-                // We need to extract the actual log content from the ZIP
-                const AdmZip = require('adm-zip');
-                const zip = new AdmZip(buffer);
-                const zipEntries = zip.getEntries();
-                
-                // Combine all text files in the ZIP
-                rawData = '';
-                zipEntries.forEach(entry => {
-                    if (!entry.isDirectory) {
-                        rawData += zip.readAsText(entry) + '\n';
-                    }
-                });
-                console.log(`📊 Extracted ${rawData.length} characters from ZIP`);
-            } catch (e) {
-                console.error('Failed to unzip, trying as text anyway:', e);
-                rawData = Buffer.from(logsBuffer).toString('binary');
-            }
-        } else {
-            // Not a ZIP, read as text
-            rawData = Buffer.from(logsBuffer).toString('binary');
-            console.log('📄 Logs are plain text, not zipped');
-        }
+            // Convert to UTF-8 string - this extracts readable text even from ZIP files
+            const rawData = Buffer.from(logsBuffer).toString('utf8');
+            console.log(`📄 Converted to string: ${rawData.length} characters`);
+        
             // Look for our success indicators directly
             let locked = false;
             let nexId = null;
