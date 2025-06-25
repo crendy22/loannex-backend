@@ -174,6 +174,15 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
             const logsDownload = await fetch(logsUrl);
             const logsBuffer = await logsDownload.arrayBuffer();
             
+            // 🔴 ADD THIS DEBUG CODE HERE 🔴
+            console.log(`📦 Downloaded ${logsBuffer.byteLength} bytes`);
+            
+            // Check first few bytes
+            const firstBytes = new Uint8Array(logsBuffer.slice(0, 4));
+            console.log(`First 4 bytes: ${Array.from(firstBytes).map(b => b.toString(16)).join(' ')}`);
+            console.log(`Is ZIP? ${firstBytes[0] === 0x50 && firstBytes[1] === 0x4B ? 'YES' : 'NO'}`);
+            // 🔴 END OF DEBUG CODE 🔴
+            
             // Convert to text (logs are in zip format, but we'll try to extract readable parts)
             const logsText = new TextDecoder('utf-8', { fatal: false }).decode(logsBuffer);
             
