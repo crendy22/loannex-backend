@@ -175,15 +175,44 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
         if (logsResponse.status === 302) {
             const logsUrl = logsResponse.headers.get('location');
             
-                        // Download the logs
+            // Download the logs
             const logsDownload = await fetch(logsUrl);
             const logsBuffer = await logsDownload.arrayBuffer();
             
             console.log(`📦 Downloaded ${logsBuffer.byteLength} bytes`);
             
-            // Convert to UTF-8 string - this extracts readable text even from ZIP files
-            const rawData = Buffer.from(logsBuffer).toString('utf8');
+            // Try multiple encodings to extract text from the ZIP
+            let rawData = '';
+            
+            // Method 1: Try UTF-8
+            try {
+                rawData = Buffer.from(logsBuffer).toString('utf8');
+            } catch (e) {
+                console.log('UTF-8 conversion failed, trying latin1');
+                rawData = Buffer.from(logsBuffer).toString('latin1');
+            }
+            
             console.log(`📄 Converted to string: ${rawData.length} characters`);
+            
+            // DEBUG: Check if we can find key patterns
+            const hasSuccess = rawData.includes('SUCCESS');
+            const hasLocked = rawData.includes('locked') || rawData.includes('LOCKED');
+            const hasFailed = rawData.includes('FAILED') || rawData.includes('ERROR');
+            console.log(`🔍 Pattern check - SUCCESS: ${hasSuccess}, LOCKED: ${hasLocked}, FAILED: ${hasFailed}`);
+            
+            // If we find evidence of text patterns, search more thoroughly
+            if (hasSuccess || hasLocked) {
+                // Find all occurrences of SUCCESS
+                let searchIndex = 0;
+                while ((searchIndex = rawData.indexOf('SUCCESS', searchIndex)) !== -1) {
+                    const context = rawData.substring(
+                        Math.max(0, searchIndex - 50), 
+                        Math.min(rawData.length, searchIndex + 150)
+                    ).replace(/[^\x20-\x7E\n]/g, ' ');
+                    console.log(`📝 SUCCESS context at ${searchIndex}: "${context}"`);
+                    searchIndex += 1;
+                }
+            }
         
             // Look for our success indicators directly
             let locked = false;
@@ -211,15 +240,51 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
             // Fallback: Look for SUCCESS pattern
             if (!locked && rawData.includes('SUCCESS: SELECTIVE-LOCK completed')) {
                 locked = true;
-                console.log('✅ Found SUCCESS pattern');
+                console.log('✅ Found SELECTIVE-LOCK SUCCESS pattern');
             }
             
-            // Check for AUTO-PROCESS success with flexible pattern
+            // Check for AUTO-PROCESS success - more lenient patterns
             if (!locked) {
+                // Try exact match first
                 const autoProcessMatch = rawData.match(/SUCCESS:\s*AUTO-PROCESS\s+(?:loan\s+)?(?:locked|completed)/i);
                 if (autoProcessMatch) {
                     locked = true;
                     console.log(`✅ Found AUTO-PROCESS SUCCESS pattern: "${autoProcessMatch[0]}"`);
+                } else {
+                    // Try finding the components separately (ZIP might have garbled the exact string)
+                    const hasAutoProcess = rawData.includes('AUTO-PROCESS') || rawData.includes('AUTO PROCESS');
+                    const hasSuccessNearby = rawData.includes('SUCCESS');
+                    const hasLockedNearby = rawData.includes('locked') || rawData.includes('LOCKED');
+                    
+                    if (hasAutoProcess && hasSuccessNearby && hasLockedNearby) {
+                        // Find positions to verify they're near each other
+                        const autoPos = rawData.indexOf('AUTO-PROCESS') !== -1 ? rawData.indexOf('AUTO-PROCESS') : rawData.indexOf('AUTO PROCESS');
+                        const successPos = rawData.indexOf('SUCCESS');
+                        
+                        if (autoPos !== -1 && successPos !== -1 && Math.abs(autoPos - successPos) < 100) {
+                            locked = true;
+                            console.log('✅ Found AUTO-PROCESS SUCCESS pattern (proximity match)');
+                        }
+                    }
+                }
+            }
+            
+            // Check for failure patterns
+            if (!locked && (rawData.includes('FAILED') || rawData.includes('ERROR'))) {
+                const failurePatterns = [
+                    /FAILED:\s*AUTO-PROCESS/i,
+                    /ERROR:\s*(?:Failed to lock|Lock failed)/i,
+                    /Lock Status:\s*Failed/i,
+                    /FAILURE:\s*(?:AUTO-PROCESS|SELECTIVE-LOCK)/i
+                ];
+                
+                for (const pattern of failurePatterns) {
+                    const match = rawData.match(pattern);
+                    if (match) {
+                        errorMessage = match[0];
+                        console.log(`❌ Found failure pattern: "${match[0]}"`);
+                        break;
+                    }
                 }
             }
             
@@ -232,13 +297,19 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
             
             // If we still don't have borrower name, try to extract it
             if (borrowerName === 'Unknown') {
-                const borrowerMatch = rawData.match(/Loan to lock:[:\s]+([^-\n]+)/i);
+                const borrowerMatch = rawData.match(/(?:Loan to lock|Processing loan for|Borrower):[:\s]+([^-\n]+)/i);
                 if (borrowerMatch) {
                     borrowerName = borrowerMatch[1].trim();
                 }
             }
             
             console.log(`📊 FINAL: locked=${locked}, nexId=${nexId}, borrower=${borrowerName}, loanIndex=${loanIndex}`);
+            
+            // IMPORTANT: Only trust the log parsing if we found clear evidence
+            if (!locked && !errorMessage && !hasSuccess && !hasFailed) {
+                console.log('⚠️ No clear success/failure patterns found - falling back to workflow analysis');
+                return await analyzeWorkflowMultipleWays(owner, repo, token, workflow);
+            }
             
             return {
                 workflowId: workflow.id,
@@ -251,7 +322,7 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
                 completedAt: workflow.updated_at,
                 githubUrl: workflow.html_url,
                 status: 'pattern_search',
-                successPattern: locked ? 'LOCK_RESULT found' : 'No success pattern found'
+                successPattern: locked ? 'Pattern found in logs' : 'No success pattern found'
             };
             
         } else {
@@ -264,6 +335,61 @@ async function analyzeWorkflowLogs(owner, repo, token, workflow) {
         console.error(`Error analyzing workflow ${workflow.id}:`, error);
         // Fall back to the multi-approach analysis
         return await analyzeWorkflowMultipleWays(owner, repo, token, workflow);
+    }
+}
+
+// FALLBACK: Try multiple approaches if logs aren't available
+async function analyzeWorkflowMultipleWays(owner, repo, token, workflow) {
+    try {
+        console.log(`🔍 MULTI-APPROACH: Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
+        
+        // IMPORTANT: When we can't read logs, we should be conservative
+        // A successful workflow doesn't always mean the loan was locked
+        
+        // Default to NOT locked unless we have strong evidence
+        let locked = false;
+        let errorMessage = 'Could not determine lock status from logs';
+        let successPattern = '';
+        
+        // Only if workflow failed can we be confident the loan didn't lock
+        if (workflow.conclusion === 'failure') {
+            locked = false;
+            errorMessage = 'Workflow failed';
+            successPattern = 'Workflow failure indicates lock failed';
+            console.log(`❌ Workflow ${workflow.id} failed - loan not locked`);
+        } else if (workflow.conclusion === 'success') {
+            // For successful workflows, we can't be sure without logs
+            // So we mark it as unknown/indeterminate
+            console.log(`⚠️ Workflow ${workflow.id} succeeded but can't verify lock status without logs`);
+            errorMessage = 'Workflow succeeded but lock status unknown (logs unreadable)';
+        }
+        
+        return {
+            workflowId: workflow.id,
+            loanIndex: 'Unknown',
+            borrowerName: 'Unknown',
+            nexId: null,
+            locked: locked,
+            errorMessage: errorMessage,
+            completedAt: workflow.updated_at,
+            githubUrl: workflow.html_url,
+            status: 'workflow_conclusion_only',
+            successPattern: successPattern
+        };
+
+    } catch (error) {
+        console.error(`💥 Error in multi-approach analysis for workflow ${workflow.id}:`, error);
+        return {
+            workflowId: workflow.id,
+            loanIndex: 'Unknown',
+            borrowerName: 'Unknown',
+            nexId: null,
+            locked: false,
+            errorMessage: `Analysis error: ${error.message}`,
+            completedAt: workflow.updated_at,
+            githubUrl: workflow.html_url,
+            status: 'analysis_error'
+        };
     }
 }
 
@@ -331,102 +457,6 @@ function extractBorrowerName(logsText) {
     }
     
     return 'Unknown';
-}
-
-// FALLBACK: Try multiple approaches if logs aren't available
-async function analyzeWorkflowMultipleWays(owner, repo, token, workflow) {
-    try {
-        console.log(`🔍 MULTI-APPROACH: Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
-        
-        // Approach 1: Try to get jobs instead of logs
-        console.log(`🎯 Approach 1: Getting workflow jobs for ${workflow.id}`);
-        const jobsResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${workflow.id}/jobs`, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        });
-
-        if (jobsResponse.ok) {
-            const jobsData = await jobsResponse.json();
-            console.log(`📋 Found ${jobsData.jobs.length} jobs for workflow ${workflow.id}`);
-            
-            // Check if the workflow conclusion indicates success
-            let locked = false;
-            let successPattern = '';
-            let errorMessage = null;
-            
-            // Simple heuristic: if workflow concluded successfully, likely locked
-            if (workflow.conclusion === 'success') {
-                locked = true;
-                successPattern = 'Workflow completed successfully';
-                console.log(`🎯 SUCCESS HEURISTIC: Workflow ${workflow.id} concluded with 'success'`);
-            } else {
-                // Look at job names/conclusions for clues
-                const failedJob = jobsData.jobs.find(job => job.conclusion === 'failure');
-                if (failedJob) {
-                    errorMessage = `Job "${failedJob.name}" failed`;
-                    console.log(`❌ FAILURE HEURISTIC: Job "${failedJob.name}" failed`);
-                } else {
-                    errorMessage = `Workflow concluded with: ${workflow.conclusion}`;
-                }
-            }
-            
-            const loanIndex = extractLoanIndexFromJobName(jobsData.jobs);
-            const borrowerName = 'Unknown'; // Can't extract from job data
-            
-            console.log(`📊 JOB-BASED ANALYSIS: loan=${loanIndex}, locked=${locked}, pattern="${successPattern}"`);
-
-            return {
-                workflowId: workflow.id,
-                loanIndex: loanIndex,
-                borrowerName: borrowerName,
-                nexId: null,  // Can't extract from jobs
-                locked: locked,
-                errorMessage: errorMessage,
-                completedAt: workflow.updated_at,
-                githubUrl: workflow.html_url,
-                status: 'job_based_analysis',
-                successPattern: successPattern
-            };
-        }
-        
-        // Approach 2: Fallback - just use workflow conclusion
-        console.log(`🎯 Approach 2: Using workflow conclusion only for ${workflow.id}`);
-        
-        let locked = workflow.conclusion === 'success';
-        let errorMessage = locked ? null : `Workflow failed with conclusion: ${workflow.conclusion}`;
-        let successPattern = locked ? 'Workflow concluded successfully' : '';
-        
-        console.log(`📊 CONCLUSION-BASED ANALYSIS: locked=${locked}, conclusion="${workflow.conclusion}"`);
-
-        return {
-            workflowId: workflow.id,
-            loanIndex: 'Unknown',
-            borrowerName: 'Unknown',
-            nexId: null,
-            locked: locked,
-            errorMessage: errorMessage,
-            completedAt: workflow.updated_at,
-            githubUrl: workflow.html_url,
-            status: 'conclusion_based',
-            successPattern: successPattern
-        };
-
-    } catch (error) {
-        console.error(`💥 Error in multi-approach analysis for workflow ${workflow.id}:`, error);
-        return {
-            workflowId: workflow.id,
-            loanIndex: 'Unknown',
-            borrowerName: 'Unknown',
-            nexId: null,
-            locked: false,
-            errorMessage: `Analysis error: ${error.message}`,
-            completedAt: workflow.updated_at,
-            githubUrl: workflow.html_url,
-            status: 'analysis_error'
-        };
-    }
 }
 
 // Try to extract loan index from job names
