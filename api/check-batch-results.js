@@ -104,8 +104,10 @@ export default async function handler(req, res) {
         // Analyze each completed workflow
         const results = [];
         for (const workflow of completedWorkflows) {
-            const loanResult = analyzeWorkflowSimple(workflow);
-            results.push(loanResult);
+            const loanResult = await analyzeWorkflowSimple(workflow, GITHUB_TOKEN);
+            if (loanResult) {
+                results.push(loanResult);
+            }
         }
 
         // Calculate summary
@@ -141,35 +143,99 @@ export default async function handler(req, res) {
     }
 }
 
-// SIMPLIFIED: Just check workflow conclusion
-function analyzeWorkflowSimple(workflow) {
+// ENHANCED: Parse actual lock results from workflow logs
+async function analyzeWorkflowSimple(workflow, githubToken) {
     console.log(`🔍 Analyzing workflow ${workflow.id} (${workflow.conclusion})`);
     
-    // Simple approach: GitHub Actions workflow conclusion tells us if the loan locked
-    // If workflow succeeded = loan locked
-    // If workflow failed = loan didn't lock
-    const locked = workflow.conclusion === 'success';
-    
-    console.log(`📊 Workflow ${workflow.id}: conclusion = ${workflow.conclusion}, locked = ${locked}`);
-    
-    // Try to extract loan index from workflow name if available
-    let loanIndex = 'Unknown';
-    const workflowMatch = workflow.name?.match(/\d+/);
-    if (workflowMatch) {
-        loanIndex = parseInt(workflowMatch[0]);
+    try {
+        // Get jobs for this workflow
+        const jobsResponse = await fetch(workflow.jobs_url, {
+            headers: {
+                'Authorization': `Bearer ${githubToken}`,
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+        
+        if (!jobsResponse.ok) {
+            console.log('Failed to get jobs for workflow');
+            return getFallbackResult(workflow);
+        }
+        
+        const jobsData = await jobsResponse.json();
+        const job = jobsData.jobs[0];
+        
+        if (!job) {
+            console.log('No jobs found in workflow');
+            return getFallbackResult(workflow);
+        }
+        
+        // Get logs
+        const logsResponse = await fetch(`${job.url}/logs`, {
+            headers: {
+                'Authorization': `Bearer ${githubToken}`,
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+        
+        if (!logsResponse.ok) {
+            console.log('Failed to get logs for job');
+            return getFallbackResult(workflow);
+        }
+        
+        const logsText = await logsResponse.text();
+        
+        // Parse the ACTUAL lock result from Python script output
+        const lockResultMatch = logsText.match(/🔒 LOCK_RESULT: ({[^}]+})/);
+        
+        if (lockResultMatch) {
+            try {
+                const lockResult = JSON.parse(lockResultMatch[1]);
+                
+                console.log(`✅ Found lock result:`, lockResult);
+                
+                return {
+                    workflowId: workflow.id,
+                    loanIndex: 'Unknown', // Would need to parse this separately
+                    borrowerName: lockResult.borrower_name,
+                    nexId: lockResult.nex_id,
+                    nex_id: lockResult.nex_id,
+                    locked: lockResult.lock_status === 'success',
+                    errorMessage: lockResult.lock_status === 'success' ? null : lockResult.message,
+                    completedAt: workflow.updated_at,
+                    githubUrl: workflow.html_url,
+                    status: 'parsed_from_logs',
+                    successPattern: `Lock result: ${lockResult.lock_status}`
+                };
+                
+            } catch (parseError) {
+                console.error('Error parsing lock result JSON:', parseError);
+            }
+        }
+        
+        // If no lock result found, return fallback
+        return getFallbackResult(workflow);
+        
+    } catch (error) {
+        console.error('Error analyzing workflow:', error);
+        return getFallbackResult(workflow);
     }
+}
+
+// Helper function for fallback results
+function getFallbackResult(workflow) {
+    const locked = workflow.conclusion === 'success';
     
     return {
         workflowId: workflow.id,
-        loanIndex: loanIndex,
+        loanIndex: 'Unknown',
         borrowerName: 'Unknown',
         nexId: null,
         nex_id: null,
         locked: locked,
-        errorMessage: locked ? null : 'Loan failed to lock',
+        errorMessage: locked ? null : 'Could not parse lock result from logs',
         completedAt: workflow.updated_at,
         githubUrl: workflow.html_url,
-        status: 'workflow_conclusion',
+        status: 'workflow_conclusion_fallback',
         successPattern: locked ? 'Workflow succeeded' : 'Workflow failed'
     };
 }
